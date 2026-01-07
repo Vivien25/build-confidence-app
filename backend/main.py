@@ -1,10 +1,10 @@
 from fastapi import FastAPI
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth, chat, progress
 
-app = FastAPI(title="Build Confidence API")
+app = FastAPI()
 
-# Allow local dev origins (frontend at localhost:5173 by default)
+# allow frontend to call backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -13,10 +13,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router)
-app.include_router(chat.router)
-app.include_router(progress.router)
+class ChatRequest(BaseModel):
+    message: str
 
-@app.get("/")
-def healthcheck():
-    return {"status": "ok"}
+class ChatResponse(BaseModel):
+    reply: str
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    return ChatResponse(
+        reply=f"I hear you. You said: {req.message}"
+    )
