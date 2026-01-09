@@ -39,6 +39,50 @@ export default function Chat() {
   const listRef = useRef(null);
 
   useEffect(() => {
+    // Only run once on mount
+    const runCheckin = async () => {
+      try {
+        const res = await axios.post(`${API_BASE}/chat/checkin`, {
+          user_id: userId,
+          focus,
+          inactive_hours: 18,
+        });
+  
+        if (res.data?.should_send && String(res.data?.message || "").trim()) {
+          const checkinMsg = String(res.data.message).trim();
+  
+          setMessages((prev) => {
+            // prevent duplicates if refresh happens
+            const already = prev.some(
+              (m) => m.role === "assistant" && m.kind === "checkin" && m.message === checkinMsg
+            );
+            if (already) return prev;
+  
+            return [
+              ...prev,
+              {
+                role: "assistant",
+                mode: "chat",
+                kind: "checkin",
+                message: checkinMsg,
+                tips: [],
+                plan: [],
+                question: "",
+              },
+            ];
+          });
+        }
+      } catch {
+        // ignore check-in failures
+      }
+    };
+  
+    runCheckin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  
+
+  useEffect(() => {
     setMessages(loadSaved(storageKey));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -54,6 +98,7 @@ export default function Chat() {
     const userText = input.trim();
     setInput("");
     setLoading(true);
+
     setMessages((prev) => [...prev, { role: "user", text: userText }]);
 
     try {
@@ -63,16 +108,18 @@ export default function Chat() {
         message: userText,
       });
 
-      // New contract:
-      // { mode: "chat"|"coach", message: string, tips?: string[], question?: string }
       const mode = String(res.data?.mode || "chat").toLowerCase();
       const message = String(res.data?.message || "").trim();
       const tips = Array.isArray(res.data?.tips) ? res.data.tips.map(String) : [];
+      const plan = Array.isArray(res.data?.plan) ? res.data.plan.map(String) : [];
       const question = String(res.data?.question || "").trim();
 
       if (!message) {
         const fallback = res.data?.reply || "Coach returned an unexpected response.";
-        setMessages((prev) => [...prev, { role: "assistant", mode: "chat", message: String(fallback) }]);
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", mode: "chat", message: String(fallback), tips: [], plan: [], question: "" },
+        ]);
       } else {
         setMessages((prev) => [
           ...prev,
@@ -81,6 +128,7 @@ export default function Chat() {
             mode: mode === "coach" ? "coach" : "chat",
             message,
             tips: tips.filter((t) => t.trim()).slice(0, 3),
+            plan: plan.filter((p) => p.trim()).slice(0, 5),
             question,
           },
         ]);
@@ -88,7 +136,14 @@ export default function Chat() {
     } catch (err) {
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", mode: "chat", message: "Sorry — something went wrong while talking to the coach." },
+        {
+          role: "assistant",
+          mode: "chat",
+          message: "Sorry — something went wrong while talking to the coach.",
+          tips: [],
+          plan: [],
+          question: "",
+        },
       ]);
     } finally {
       setLoading(false);
@@ -185,10 +240,8 @@ export default function Chat() {
                   <div style={styles.bubbleUser}>{m.text}</div>
                 ) : (
                   <div style={styles.bubbleCoach}>
-                    {/* Friend-like default */}
                     <div>{m.message || m.text}</div>
 
-                    {/* Only show extras if provided */}
                     {Array.isArray(m.tips) && m.tips.length > 0 && (
                       <div style={{ marginTop: 12 }}>
                         <div style={styles.label}>Tips</div>
@@ -202,19 +255,31 @@ export default function Chat() {
                       </div>
                     )}
 
-             {m.question && (
-                    <div style={{ marginTop: 10 }}>
-                      {m.mode === "chat" ? (
-                    <div style={{ opacity: 0.95 }}>{m.question}</div>
-                    ) : (
-                        <>
-                  <div style={styles.label}>Question</div>
-                    <div>{m.question}</div>
-                </>
-            )}
-  </div>
-)}
+                    {Array.isArray(m.plan) && m.plan.length > 0 && (
+                      <div style={{ marginTop: 12 }}>
+                        <div style={styles.label}>Plan</div>
+                        <ol style={{ margin: 0, paddingLeft: 18 }}>
+                          {m.plan.map((step, idx) => (
+                            <li key={idx} style={{ marginBottom: 6 }}>
+                              {step}
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    )}
 
+                    {!!m.question?.trim() && (
+                      <div style={{ marginTop: 10 }}>
+                        {m.mode === "chat" ? (
+                          <div style={{ opacity: 0.95 }}>{m.question}</div>
+                        ) : (
+                          <>
+                            <div style={styles.label}>Question</div>
+                            <div>{m.question}</div>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
