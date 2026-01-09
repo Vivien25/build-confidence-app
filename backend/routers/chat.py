@@ -1,62 +1,136 @@
 import os
+import json
+import re
+from typing import List, Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
 from google import genai
 from google.genai import types
 
-router = APIRouter()
+router = APIRouter(prefix="/chat", tags=["chat"])
 
-class ChatRequest(BaseModel):
+API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+if not API_KEY:
+    raise RuntimeError("Missing GEMINI_API_KEY (or GOOGLE_API_KEY) in backend/.env")
+
+# ✅ Set this in backend/.env (recommended)
+# GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+
+client = genai.Client(api_key=API_KEY)
+
+
+class ChatIn(BaseModel):
+    user_id: str = "local-dev"
+    focus: str = "work"
     message: str
 
-class ChatResponse(BaseModel):
-    reply: str
 
-SYSTEM_PROMPT = """
-You are Mira, a professional and gentle confidence coach.
+class ChatOut(BaseModel):
+    # "chat" = friend-like reply (default)
+    # "coach" = structured coaching mode (only when helpful)
+    mode: str
+    message: str
+    tips: List[str] = []
+    question: str = ""
 
-Your tone is:
-- Warm
-- Calm
-- Supportive
-- Practical
 
-For every response:
-1) Briefly reflect what the user is feeling
-2) Give 1–2 actionable confidence-building tips
-3) End with a gentle follow-up question
-
-Speak as a female coach named Mira.
-""".strip()
-
-def make_client():
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="Set GOOGLE_API_KEY (or GEMINI_API_KEY)")
-    return genai.Client(api_key=api_key)
-
-@router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def extract_json_object(s: str) -> Optional[dict]:
+    """Extract first JSON object from mixed text."""
+    if not s:
+        return None
+    m = re.search(r"\{.*\}", s, re.DOTALL)
+    if not m:
+        return None
     try:
-        client = make_client()
+        return json.loads(m.group(0))
+    except Exception:
+        return None
 
-        # Gemini 3 (preview). If your key/account doesn’t have access, switch to gemini-2.5-flash.
-        model_id = "gemini-3-flash-preview"
 
+@router.post("", response_model=ChatOut)
+def chat(payload: ChatIn):
+    user_msg = (payload.message or "").strip()
+    if not user_msg:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    system = (
+        "You are a supportive, friend-like coach for building confidence.\n"
+        "Return ONLY raw JSON (no markdown, no backticks, no extra text).\n"
+        "JSON keys:\n"
+        "- mode: 'chat' or 'coach'\n"
+        "- message: natural reply like a real friend (required)\n"
+        "- tips: optional array (0-3) short actionable tips\n"
+        "- question: optional short follow-up question (string)\n"
+        "\n"
+        "Rules:\n"
+        "- Default to mode='chat'.\n"
+        "- Use mode='coach' only when the user asks for a plan/steps, is stuck, or needs structure.\n"
+        "- Don't force tips/question every time.\n"
+        "\n"
+        "Example:\n"
+        "{\"mode\":\"chat\",\"message\":\"Hey — totally normal to feel that way...\",\"tips\":[],\"question\":\"\"}\n"
+    )
+
+    prompt = {
+        "focus": payload.focus,
+        "user_message": user_msg,
+    }
+
+    try:
         resp = client.models.generate_content(
-            model=model_id,
-            contents=req.message,
+            model=GEMINI_MODEL,
+            contents=[system + "\n\n" + json.dumps(prompt, ensure_ascii=False)],
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
                 temperature=0.7,
-                max_output_tokens=600,
+                response_mime_type="application/json",
             ),
         )
 
-        text = (resp.text or "").strip()
-        if not text:
-            text = "I’m here with you. What’s one thing you’d like to feel more confident about today?"
-        return ChatResponse(reply=text)
+        raw = resp.text or ""
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = extract_json_object(raw)
 
+        if not data:
+            print("❌ Gemini returned non-JSON:\n", raw[:2000])
+            raise HTTPException(status_code=500, detail="Gemini did not return valid JSON. Check logs.")
+
+        mode = str(data.get("mode", "chat")).strip().lower()
+        message = str(data.get("message", "")).strip()
+        tips = data.get("tips", [])
+        question = str(data.get("question", "")).strip()
+
+        if mode not in ("chat", "coach"):
+            mode = "chat"
+
+        if not message:
+            print("❌ Missing message field:", data)
+            raise HTTPException(status_code=500, detail="Gemini returned invalid JSON: missing message.")
+
+        if not isinstance(tips, list):
+            tips = []
+
+        # sanitize tips
+        tips_clean = []
+        for t in tips:
+            s = str(t).strip()
+            if s:
+                tips_clean.append(s)
+        tips_clean = tips_clean[:3]
+
+        return {
+            "mode": mode,
+            "message": message,
+            "tips": tips_clean,
+            "question": question,
+        }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini error: {e}")
+        print("❌ Gemini error:", repr(e))
+        raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
