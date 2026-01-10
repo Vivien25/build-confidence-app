@@ -1,12 +1,16 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import axios from "axios";
 import { getProfile, saveProfile } from "../utils/profile";
+
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 const AVATARS = [
   { id: "fem", label: "Feminine avatar" },
   { id: "masc", label: "Masculine avatar" },
   { id: "neutral", label: "Neutral avatar" },
-  { id: "custom", label: "Let me choose later" },
+  // If you keep "custom", make sure Chat falls back to neutral
+  // { id: "custom", label: "Let me choose later" },
 ];
 
 export default function Onboarding() {
@@ -14,18 +18,54 @@ export default function Onboarding() {
   const existing = useMemo(() => getProfile(), []);
 
   const [name, setName] = useState(existing?.name ?? "");
+  const [email, setEmail] = useState(existing?.email ?? "");
   const [avatar, setAvatar] = useState(existing?.avatar ?? "neutral");
-  const [focus, setFocus] = useState(existing?.focus ?? "work");
 
-  const onContinue = () => {
-    saveProfile({
-      name: name.trim(),
-      avatar,
-      focus,
-      coachAvatar: "coach_mira",
-      createdAt: new Date().toISOString(),
-    });
-    navigate("/work");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const onContinue = async () => {
+    setError("");
+
+    const cleanName = name.trim();
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (!cleanName) {
+      setError("Please enter your name.");
+      return;
+    }
+
+    if (!cleanEmail || !/^\S+@\S+\.\S+$/.test(cleanEmail)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      // 🔐 login / create user
+      const res = await axios.post(`${API_BASE}/users/login`, {
+        name: cleanName,
+        email: cleanEmail,
+      });
+
+      // Save minimal profile (focus is chosen on /focus page)
+      saveProfile({
+        user_id: res.data.user_id,
+        name: res.data.name,
+        email: res.data.email,
+        avatar,
+        coachAvatar: "coach_mira",
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      navigate("/focus");
+    } catch (err) {
+      setError("Something went wrong while creating your profile. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -33,21 +73,43 @@ export default function Onboarding() {
       <h2>Quick setup</h2>
       <p>We’ll personalize your experience. You can change this later.</p>
 
+      {error && (
+        <div style={{ marginTop: 12, color: "#b91c1c", fontWeight: 600 }}>
+          {error}
+        </div>
+      )}
+
       {/* Name */}
       <div style={{ marginTop: 16 }}>
         <label>
-          Name (optional)
+          Name
           <input
             style={{ display: "block", width: "100%", padding: 8, marginTop: 6 }}
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g., Vivien"
+            autoComplete="name"
+          />
+        </label>
+      </div>
+
+      {/* Email */}
+      <div style={{ marginTop: 16 }}>
+        <label>
+          Email
+          <input
+            type="email"
+            style={{ display: "block", width: "100%", padding: 8, marginTop: 6 }}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="e.g., vivien@example.com"
+            autoComplete="email"
           />
         </label>
       </div>
 
       {/* Avatar */}
-      <div style={{ marginTop: 16 }}>
+      <div style={{ marginTop: 20 }}>
         <div style={{ fontWeight: 600, marginBottom: 8 }}>
           Choose an avatar style
         </div>
@@ -67,32 +129,12 @@ export default function Onboarding() {
         ))}
       </div>
 
-      {/* Focus area */}
-      <div style={{ marginTop: 20 }}>
-        <div style={{ fontWeight: 600, marginBottom: 8 }}>
-          What do you want to work on right now?
-        </div>
-
-        {["family", "appearance", "relationship", "work"].map((item) => (
-          <label key={item} style={{ display: "block", marginBottom: 8 }}>
-            <input
-              type="radio"
-              name="focus"
-              value={item}
-              checked={focus === item}
-              onChange={() => setFocus(item)}
-              style={{ marginRight: 8 }}
-            />
-            {item.charAt(0).toUpperCase() + item.slice(1)}
-          </label>
-        ))}
-      </div>
-
       <button
         onClick={onContinue}
+        disabled={loading}
         style={{ marginTop: 20, padding: "10px 14px" }}
       >
-        Continue
+        {loading ? "Saving…" : "Continue"}
       </button>
     </div>
   );

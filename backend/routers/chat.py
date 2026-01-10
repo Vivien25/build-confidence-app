@@ -11,6 +11,18 @@ from pydantic import BaseModel
 from google import genai
 from google.genai import types
 
+from datetime import datetime, timedelta
+
+def should_check_in(last_activity: str, hours=6) -> bool:
+    if not last_activity:
+        return True
+    try:
+        last = datetime.fromisoformat(last_activity)
+        return datetime.utcnow() - last > timedelta(hours=hours)
+    except Exception:
+        return True
+
+
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -104,6 +116,27 @@ def extract_json_object(s: str) -> Optional[dict]:
     except Exception:
         return None
 
+def is_returning(msg: str) -> bool:
+    if not msg:
+        return False
+
+    m = msg.lower().strip()
+
+    patterns = [
+        r"\bhi\b",
+        r"\bhello\b",
+        r"\bhey\b",
+        r"\bi'?m back\b",
+        r"\bback again\b",
+        r"\bhere again\b",
+        r"\bchecking in\b",
+        r"\bi'?m here\b",
+        r"\blet'?s continue\b",
+        r"\bit'?s me\b",
+    ]
+
+    return any(re.search(p, m) for p in patterns)
+
 
 # ---------------------------
 # Main chat endpoint
@@ -114,8 +147,27 @@ def chat(payload: ChatIn):
     if not user_msg:
         raise HTTPException(status_code=400, detail="message is required")
 
-    # record activity whenever user sends a message
+    # record activity
     touch_user(payload.user_id)
+
+    # 👇 LOAD MEMORY HERE
+    st = get_user_state(payload.user_id)
+    current_plan = st.get("current_plan", [])
+    last_activity = st.get("last_user_activity")
+    
+    # 2️⃣ EARLY RETURN: returning user + existing plan + time gap
+    if (
+        is_returning(user_msg)
+        and current_plan
+        and should_check_in(last_activity, hours=6)
+    ):
+        return {
+            "mode": "chat",
+            "message": "Hey 🙂 Welcome back. Just checking in — how did it go with your plan?",
+            "tips": [],
+            "plan": [],
+            "question": "Which step did you manage to do, or what got in the way?",
+        }
 
     system = (
         "You are a supportive, friend-like confidence coach.\n"
@@ -134,6 +186,10 @@ def chat(payload: ChatIn):
         "- If you include plan, steps must be short and executable.\n"
         "- Don't force tips/plan/question every time.\n"
     )
+
+    st = get_user_state(payload.user_id)
+    current_plan = st.get("current_plan", [])
+    last_activity = st.get("last_user_activity")
 
     prompt = {
         "focus": payload.focus,
@@ -201,13 +257,23 @@ def chat(payload: ChatIn):
             "plan": plan_clean,
             "question": question,
         }
-
     except HTTPException:
         raise
-    except Exception as e:
-        print("❌ Gemini error:", repr(e))
-        raise HTTPException(status_code=500, detail=f"Gemini error: {str(e)}")
 
+    except Exception as e:
+        msg = str(e)
+
+        if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
+            return {
+            "mode": "chat",
+            "message": "I’m a bit overloaded right now 😅 Let’s pause for a moment.",
+            "tips": [],
+            "plan": [],
+            "question": "Can we pick this up again shortly?",
+        }
+        
+        print("❌ Gemini error:", repr(e))
+        raise HTTPException(status_code=500, detail="AI service error")
 
 # ---------------------------
 # Daily check-in endpoint

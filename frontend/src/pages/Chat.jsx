@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { getProfile } from "../utils/profile";
 import { avatarMap, coachAvatar } from "../utils/avatars";
+import { useNavigate } from "react-router-dom";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
@@ -23,6 +24,8 @@ function save(key, value) {
 }
 
 export default function Chat() {
+  const navigate = useNavigate();
+
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -32,14 +35,17 @@ export default function Chat() {
   const userAvatar = avatarMap[userAvatarKey];
   const coach = coachAvatar;
 
-  const userId = profile?.id || "local-dev";
+  const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
   const storageKey = `bc_chat_${userId}_${focus}`;
 
   const listRef = useRef(null);
 
+  // Load saved messages + run check-in (once on mount)
   useEffect(() => {
-    // Only run once on mount
+    const saved = loadSaved(storageKey);
+    setMessages(saved);
+
     const runCheckin = async () => {
       try {
         const res = await axios.post(`${API_BASE}/chat/checkin`, {
@@ -47,51 +53,47 @@ export default function Chat() {
           focus,
           inactive_hours: 18,
         });
-  
-        if (res.data?.should_send && String(res.data?.message || "").trim()) {
-          const checkinMsg = String(res.data.message).trim();
-  
-          setMessages((prev) => {
-            // prevent duplicates if refresh happens
-            const already = prev.some(
-              (m) => m.role === "assistant" && m.kind === "checkin" && m.message === checkinMsg
-            );
-            if (already) return prev;
-  
-            return [
-              ...prev,
-              {
-                role: "assistant",
-                mode: "chat",
-                kind: "checkin",
-                message: checkinMsg,
-                tips: [],
-                plan: [],
-                question: "",
-              },
-            ];
-          });
-        }
+
+        const shouldSend = !!res.data?.should_send;
+        const checkinMsg = String(res.data?.message || "").trim();
+        if (!shouldSend || !checkinMsg) return;
+
+        setMessages((prev) => {
+          // prevent duplicates (refresh or rerender)
+          const already = prev.some(
+            (m) => m.role === "assistant" && m.kind === "checkin" && m.message === checkinMsg
+          );
+          if (already) return prev;
+
+          return [
+            ...prev,
+            {
+              role: "assistant",
+              mode: "chat",
+              kind: "checkin",
+              message: checkinMsg,
+              tips: [],
+              plan: [],
+              question: "",
+            },
+          ];
+        });
       } catch {
         // ignore check-in failures
       }
     };
-  
+
     runCheckin();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  
+  }, []); // run once
 
-  useEffect(() => {
-    setMessages(loadSaved(storageKey));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
+  // Persist + autoscroll
   useEffect(() => {
     save(storageKey, messages);
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, storageKey]);
 
+  // Send message (user action)
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
 
@@ -99,6 +101,7 @@ export default function Chat() {
     setInput("");
     setLoading(true);
 
+    // add user message immediately
     setMessages((prev) => [...prev, { role: "user", text: userText }]);
 
     try {
@@ -133,7 +136,7 @@ export default function Chat() {
           },
         ]);
       }
-    } catch (err) {
+    } catch {
       setMessages((prev) => [
         ...prev,
         {
@@ -195,26 +198,30 @@ export default function Chat() {
       whiteSpace: "pre-wrap",
       lineHeight: 1.45,
     },
+    btn: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "var(--bg-page, #ffffff)",
+      color: "var(--text-primary, #111827)",
+      padding: "0 12px",
+      cursor: "pointer",
+    },
   };
 
   return (
     <div style={styles.page}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
-        <h2 style={{ margin: 0 }}>Build Confidence Chat</h2>
-        <button
-          onClick={clearChat}
-          style={{
-            height: 36,
-            borderRadius: 10,
-            border: "1px solid var(--border-soft, #e5e7eb)",
-            background: "var(--bg-page, #ffffff)",
-            color: "var(--text-primary, #111827)",
-            padding: "0 12px",
-            cursor: "pointer",
-          }}
-        >
-          Clear
-        </button>
+        <h2 style={{ margin: 0 }}>Build Confidence</h2>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => navigate("/focus")} style={styles.btn}>
+            Change focus
+          </button>
+          <button onClick={clearChat} style={styles.btn}>
+            Clear
+          </button>
+        </div>
       </div>
 
       <div ref={listRef} style={styles.panel}>
@@ -231,7 +238,13 @@ export default function Chat() {
 
           return (
             <div key={i} style={{ display: "flex", alignItems: "flex-start", marginBottom: 12 }}>
-              <img src={avatarImg} alt={name} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
+              <img
+                src={avatarImg}
+                alt={name}
+                width={36}
+                height={36}
+                style={{ borderRadius: "50%", marginRight: 10 }}
+              />
 
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, marginBottom: 6 }}>{name}</div>
@@ -289,7 +302,13 @@ export default function Chat() {
 
         {loading && (
           <div style={{ display: "flex", alignItems: "center", opacity: 0.85, marginTop: 8 }}>
-            <img src={coach.img} alt={coach.label} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
+            <img
+              src={coach.img}
+              alt={coach.label}
+              width={36}
+              height={36}
+              style={{ borderRadius: "50%", marginRight: 10 }}
+            />
             <div>
               <div style={{ fontWeight: 700 }}>Coach</div>
               <div style={styles.muted}>typing…</div>

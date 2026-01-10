@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routers.chat import router as chat_router
+from routers.users import router as users_router
 
 app = FastAPI(title="Build Confidence API")
 
@@ -19,3 +20,4 @@ app.add_middleware(
 
 # register routers
 app.include_router(chat_router)
+app.include_router(users_router)
