@@ -9,7 +9,7 @@ export default function Welcome() {
       </p>
 
       <div style={{ marginTop: 16 }}>
-        <Link to="/onboarding">
+        <Link to="/intro">
           <button style={{ padding: "10px 14px", cursor: "pointer" }}>
             Meet Mira →
           </button>
