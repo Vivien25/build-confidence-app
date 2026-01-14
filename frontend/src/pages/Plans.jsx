@@ -33,7 +33,7 @@ const FOCUS_OPTIONS = ["all", "work", "relationship", "appearance", "social"];
 export default function Plans() {
   const navigate = useNavigate();
 
-  // keep profile fresh
+  // ✅ do NOT freeze profile forever
   const [profile, setProfile] = useState(() => getProfile() || {});
   useEffect(() => {
     setProfile(getProfile() || {});
@@ -47,15 +47,12 @@ export default function Plans() {
   const [checkins, setCheckins] = useState([]);
   const [filter, setFilter] = useState("all");
 
-  // hydration guards
+  // ✅ hydration guards
   const [plansHydrated, setPlansHydrated] = useState(false);
   const [checkinsHydrated, setCheckinsHydrated] = useState(false);
 
-  // hydrate whenever keys change
+  // ✅ hydrate when keys change (user changes / login changes)
   useEffect(() => {
-    setPlansHydrated(false);
-    setCheckinsHydrated(false);
-
     const p = loadSaved(plansKey, []);
     const c = loadSaved(checkinsKey, []);
 
@@ -66,13 +63,20 @@ export default function Plans() {
     setCheckinsHydrated(true);
   }, [plansKey, checkinsKey]);
 
-  // persist checkins only AFTER hydration
+  // ✅ persist plans/checkins only AFTER hydration (prevents wiping)
+  useEffect(() => {
+    if (!plansHydrated) return;
+    save(plansKey, plans);
+  }, [plansKey, plans, plansHydrated]);
+
   useEffect(() => {
     if (!checkinsHydrated) return;
     save(checkinsKey, checkins);
   }, [checkinsKey, checkins, checkinsHydrated]);
 
-  // refresh from storage when you return to this tab/page
+  // ✅ keep page fresh:
+  // 1) storage event (other tab)
+  // 2) focus event (same tab; storage event doesn't fire in same tab)
   useEffect(() => {
     const refreshFromStorage = () => {
       const p = loadSaved(plansKey, []);
@@ -113,7 +117,19 @@ export default function Plans() {
     });
   };
 
-  // accept both formats (acceptedAt OR accepted:true)
+  // ✅ delete a plan (and optionally its checkins)
+  const deletePlan = (planId) => {
+    const ok = window.confirm("Delete this plan? This cannot be undone.");
+    if (!ok) return;
+
+    // Remove from plans
+    setPlans((prev) => prev.filter((p) => p?.id !== planId));
+
+    // Optional: also remove checkins for that plan so history stays clean
+    setCheckins((prev) => prev.filter((c) => c?.planId !== planId));
+  };
+
+  // ✅ accept both formats
   const acceptedPlansAll = useMemo(() => {
     const arr = Array.isArray(plans) ? plans : [];
     return arr.filter((p) => p?.acceptedAt || p?.accepted === true);
@@ -125,8 +141,19 @@ export default function Plans() {
       : acceptedPlansAll.filter((p) => p.focus === filter);
 
   const styles = {
-    page: { maxWidth: 980, margin: "0 auto", padding: 16, color: "var(--text-primary, #111827)" },
-    topbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
+    page: {
+      maxWidth: 980,
+      margin: "0 auto",
+      padding: 16,
+      color: "var(--text-primary, #111827)",
+    },
+    topbar: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 12,
+      flexWrap: "wrap",
+    },
     btn: {
       height: 36,
       borderRadius: 10,
@@ -136,9 +163,25 @@ export default function Plans() {
       padding: "0 12px",
       cursor: "pointer",
     },
-    card: { border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: "#fff", marginBottom: 12 },
+    dangerBtn: {
+      height: 32,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "#fff",
+      color: "#b91c1c",
+      padding: "0 10px",
+      cursor: "pointer",
+    },
+    card: {
+      border: "1px solid #e5e7eb",
+      borderRadius: 12,
+      padding: 12,
+      background: "#fff",
+      marginBottom: 12,
+    },
     title: { fontWeight: 900, fontSize: 20, marginBottom: 6 },
     muted: { opacity: 0.7 },
+    row: { display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" },
   };
 
   const stillLoading = !(plansHydrated && checkinsHydrated);
@@ -147,7 +190,7 @@ export default function Plans() {
     <div style={styles.page}>
       <div style={styles.topbar}>
         <div>
-          <div style={styles.title}>Your Plans</div>
+          <div style={styles.title}>Your All Plans</div>
           <div style={{ ...styles.muted, marginBottom: 12 }}>
             Track plans across all focuses. Check in daily.
           </div>
@@ -172,22 +215,29 @@ export default function Plans() {
       {stillLoading ? (
         <div style={styles.muted}>Loading your plans…</div>
       ) : acceptedPlans.length === 0 ? (
-        <div style={styles.muted}>
-          No accepted plans yet.
-          <div style={{ marginTop: 8, fontSize: 12 }}>
-            Debug keys: <code>{plansKey}</code>
-          </div>
-        </div>
+        <div style={styles.muted}>No accepted plans yet.</div>
       ) : (
         acceptedPlans.map((p) => (
           <div key={p.id} style={styles.card}>
-            <div style={{ fontWeight: 900 }}>
-              {p.title}{" "}
-              <span style={{ fontSize: 12, opacity: 0.7 }}>({p.focus})</span>
-            </div>
+            <div style={styles.row}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 900 }}>
+                  {p.title}{" "}
+                  <span style={{ fontSize: 12, opacity: 0.7 }}>({p.focus})</span>
+                </div>
 
-            <div style={{ fontSize: 12, opacity: 0.75 }}>
-              Accepted: {p.acceptedAt ? new Date(p.acceptedAt).toLocaleString() : "—"}
+                <div style={{ fontSize: 12, opacity: 0.75 }}>
+                  Accepted: {p.acceptedAt ? new Date(p.acceptedAt).toLocaleString() : "—"}
+                </div>
+              </div>
+
+              <button
+                style={styles.dangerBtn}
+                onClick={() => deletePlan(p.id)}
+                title="Delete this plan"
+              >
+                Delete
+              </button>
             </div>
 
             <div style={{ marginTop: 10 }}>
