@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getProfile } from "../utils/profile";
 
-function loadSaved(key, fallback = []) {
+function loadSaved(key, fallback = null) {
   try {
     const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
@@ -19,13 +19,25 @@ function save(key, value) {
 
 function todayStr() {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function uid(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function focusLabel(focus) {
+  const f = String(focus || "work");
+  return f.charAt(0).toUpperCase() + f.slice(1);
+}
+
+function slugify(s) {
+  return String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/['"]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
 }
 
 const FOCUS_OPTIONS = ["all", "work", "relationship", "appearance", "social"];
@@ -33,7 +45,6 @@ const FOCUS_OPTIONS = ["all", "work", "relationship", "appearance", "social"];
 export default function Plans() {
   const navigate = useNavigate();
 
-  // ✅ do NOT freeze profile forever
   const [profile, setProfile] = useState(() => getProfile() || {});
   useEffect(() => {
     setProfile(getProfile() || {});
@@ -47,23 +58,18 @@ export default function Plans() {
   const [checkins, setCheckins] = useState([]);
   const [filter, setFilter] = useState("all");
 
-  // ✅ hydration guards
   const [plansHydrated, setPlansHydrated] = useState(false);
   const [checkinsHydrated, setCheckinsHydrated] = useState(false);
 
-  // ✅ hydrate when keys change (user changes / login changes)
   useEffect(() => {
     const p = loadSaved(plansKey, []);
     const c = loadSaved(checkinsKey, []);
-
     setPlans(Array.isArray(p) ? p : []);
     setCheckins(Array.isArray(c) ? c : []);
-
     setPlansHydrated(true);
     setCheckinsHydrated(true);
   }, [plansKey, checkinsKey]);
 
-  // ✅ persist plans/checkins only AFTER hydration (prevents wiping)
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
@@ -74,9 +80,6 @@ export default function Plans() {
     save(checkinsKey, checkins);
   }, [checkinsKey, checkins, checkinsHydrated]);
 
-  // ✅ keep page fresh:
-  // 1) storage event (other tab)
-  // 2) focus event (same tab; storage event doesn't fire in same tab)
   useEffect(() => {
     const refreshFromStorage = () => {
       const p = loadSaved(plansKey, []);
@@ -109,36 +112,98 @@ export default function Plans() {
     setCheckins((prev) => {
       const exists = prev.find((c) => c.planId === planId && c.date === d);
       if (exists) {
-        return prev.map((c) =>
-          c.planId === planId && c.date === d ? { ...c, status } : c
-        );
+        return prev.map((c) => (c.planId === planId && c.date === d ? { ...c, status } : c));
       }
       return [...prev, { id: uid("chk"), planId, date: d, status }];
     });
   };
 
-  // ✅ delete a plan (and optionally its checkins)
   const deletePlan = (planId) => {
     const ok = window.confirm("Delete this plan? This cannot be undone.");
     if (!ok) return;
-
-    // Remove from plans
     setPlans((prev) => prev.filter((p) => p?.id !== planId));
-
-    // Optional: also remove checkins for that plan so history stays clean
     setCheckins((prev) => prev.filter((c) => c?.planId !== planId));
   };
 
-  // ✅ accept both formats
   const acceptedPlansAll = useMemo(() => {
     const arr = Array.isArray(plans) ? plans : [];
     return arr.filter((p) => p?.acceptedAt || p?.accepted === true);
   }, [plans]);
 
   const acceptedPlans =
-    filter === "all"
-      ? acceptedPlansAll
-      : acceptedPlansAll.filter((p) => p.focus === filter);
+    filter === "all" ? acceptedPlansAll : acceptedPlansAll.filter((p) => p.focus === filter);
+
+  // ✅ NEW: build correct confidence key per plan (focus + need)
+  function confidenceKeyForPlan(plan) {
+    const focus = plan?.focus || "work";
+
+    // Backward compatible: if no need info, fallback to old focus-level key
+    if (!plan?.needKey && !plan?.needLabel) {
+      return `bc_conf_${userId}_${focus}`;
+    }
+
+    const needKey = String(plan?.needKey || "").trim();
+    const needLabel = String(plan?.needLabel || "").trim();
+
+    if (needKey === "custom") {
+      const slug = slugify(needLabel) || "custom";
+      return `bc_conf_${userId}_${focus}_custom_${slug}`;
+    }
+
+    // normal need keys: interview, presentation, etc.
+    return `bc_conf_${userId}_${focus}_${needKey || "interview"}`;
+  }
+
+  function getConfidenceForPlan(plan) {
+    const key = confidenceKeyForPlan(plan);
+    const conf = loadSaved(key, null);
+    if (!conf || typeof conf !== "object") return null;
+
+    const baseline = typeof conf.baseline === "number" ? conf.baseline : null;
+    const history = Array.isArray(conf.history) ? conf.history : [];
+    const t = todayStr();
+
+    const todayRow = history.find((x) => x?.date === t);
+    const today = todayRow && typeof todayRow.level === "number" ? todayRow.level : null;
+
+    const latestRow = history.length > 0 ? history[history.length - 1] : null;
+    const latest = latestRow && typeof latestRow.level === "number" ? latestRow.level : null;
+
+    const delta =
+      baseline != null && latest != null ? Math.round((latest - baseline) * 10) / 10 : null;
+
+    return { key, baseline, today, latest, delta, history };
+  }
+
+  // ✅ NEW: Summary by focus + need (based on accepted plans)
+  const confidenceSummary = useMemo(() => {
+    // Build one summary row per (focus, needKey+needLabel)
+    const map = new Map();
+
+    for (const p of acceptedPlansAll) {
+      const focus = p?.focus || "work";
+      const needKey = p?.needKey || "(legacy)";
+      const needLabel =
+        p?.needLabel || (needKey === "(legacy)" ? "Focus confidence (legacy)" : needKey);
+
+      const conf = getConfidenceForPlan(p);
+      const id = `${focus}__${needKey}__${needLabel}`;
+
+      // prefer a plan that actually has confidence recorded
+      if (!map.has(id) || (conf && conf.latest != null)) {
+        map.set(id, { focus, needKey, needLabel, conf });
+      }
+    }
+
+    // sort by focus then label
+    return Array.from(map.values()).sort((a, b) => {
+      const fa = String(a.focus);
+      const fb = String(b.focus);
+      if (fa !== fb) return fa.localeCompare(fb);
+      return String(a.needLabel).localeCompare(String(b.needLabel));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acceptedPlansAll, userId]);
 
   const styles = {
     page: {
@@ -182,6 +247,16 @@ export default function Plans() {
     title: { fontWeight: 900, fontSize: 20, marginBottom: 6 },
     muted: { opacity: 0.7 },
     row: { display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" },
+    small: { fontSize: 12, opacity: 0.8 },
+    pill: {
+      display: "inline-block",
+      fontSize: 12,
+      padding: "2px 8px",
+      borderRadius: 999,
+      border: "1px solid #e5e7eb",
+      opacity: 0.9,
+      marginLeft: 8,
+    },
   };
 
   const stillLoading = !(plansHydrated && checkinsHydrated);
@@ -201,6 +276,68 @@ export default function Plans() {
         </button>
       </div>
 
+      {/* ✅ UPDATED: Confidence summary (per focus + need) */}
+      <div style={styles.card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontWeight: 900, fontSize: 18 }}>Confidence summary</div>
+          <span style={styles.pill}>1–10 scale</span>
+          <div style={styles.muted}>Based on your check-ins from Chat.</div>
+        </div>
+
+        {confidenceSummary.length === 0 ? (
+          <div style={{ ...styles.muted, marginTop: 10 }}>No confidence data yet.</div>
+        ) : (
+          <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+            {confidenceSummary.map((row, idx) => {
+              const conf = row.conf;
+              const baseline = conf?.baseline;
+              const today = conf?.today;
+              const latest = conf?.latest;
+              const delta = conf?.delta;
+
+              const deltaText =
+                typeof delta === "number"
+                  ? delta > 0
+                    ? `(+${delta})`
+                    : delta < 0
+                    ? `(${delta})`
+                    : "(no change)"
+                  : "";
+
+              const histText = Array.isArray(conf?.history)
+                ? conf.history
+                    .slice(-6)
+                    .map((x) => (typeof x?.level === "number" ? x.level : "?"))
+                    .join(" → ")
+                : "";
+
+              return (
+                <div key={idx} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
+                  <div style={{ fontWeight: 900, marginBottom: 6 }}>
+                    {focusLabel(row.focus)} • {row.needLabel}
+                    <span style={styles.pill}>{row.focus}</span>
+                  </div>
+
+                  {baseline == null && latest == null ? (
+                    <div style={styles.muted}>No confidence records yet for this plan.</div>
+                  ) : (
+                    <div style={{ lineHeight: 1.6 }}>
+                      <div>Baseline: {baseline != null ? `${baseline}/10` : "—"}</div>
+                      <div>Today: {today != null ? `${today}/10` : "—"}</div>
+                      <div>
+                        Latest: {latest != null ? `${latest}/10` : "—"}{" "}
+                        {baseline != null && latest != null ? deltaText : ""}
+                      </div>
+                      {histText ? <div>History: {histText}</div> : null}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       <div style={{ marginBottom: 12 }}>
         <b>Filter:</b>{" "}
         <select value={filter} onChange={(e) => setFilter(e.target.value)}>
@@ -217,56 +354,105 @@ export default function Plans() {
       ) : acceptedPlans.length === 0 ? (
         <div style={styles.muted}>No accepted plans yet.</div>
       ) : (
-        acceptedPlans.map((p) => (
-          <div key={p.id} style={styles.card}>
-            <div style={styles.row}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 900 }}>
-                  {p.title}{" "}
-                  <span style={{ fontSize: 12, opacity: 0.7 }}>({p.focus})</span>
+        acceptedPlans.map((p) => {
+          const conf = getConfidenceForPlan(p);
+          const baseline = conf?.baseline;
+          const today = conf?.today;
+          const latest = conf?.latest;
+          const delta = conf?.delta;
+
+          const deltaText =
+            typeof delta === "number"
+              ? delta > 0
+                ? `(+${delta})`
+                : delta < 0
+                ? `(${delta})`
+                : "(no change)"
+              : "";
+
+          const headerNeed = p?.needLabel ? ` • ${p.needLabel}` : "";
+
+          return (
+            <div key={p.id} style={styles.card}>
+              <div style={styles.row}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 900 }}>
+                    {p.title}
+                    <span style={{ fontSize: 12, opacity: 0.7 }}>
+                      {" "}
+                      ({p.focus}
+                      {headerNeed})
+                    </span>
+                  </div>
+
+                  <div style={styles.small}>
+                    Accepted: {p.acceptedAt ? new Date(p.acceptedAt).toLocaleString() : "—"}
+                  </div>
+
+                  {/* ✅ UPDATED: show confidence for this plan’s NEED */}
+                  <div style={{ marginTop: 8, lineHeight: 1.6 }}>
+                    <b>Confidence</b>{" "}
+                    <span style={styles.small}>
+                      — Baseline: {baseline != null ? `${baseline}/10` : "—"} • Today:{" "}
+                      {today != null ? `${today}/10` : "—"} • Latest:{" "}
+                      {latest != null ? `${latest}/10` : "—"}{" "}
+                      {baseline != null && latest != null ? deltaText : ""}
+                    </span>
+                  </div>
                 </div>
 
-                <div style={{ fontSize: 12, opacity: 0.75 }}>
-                  Accepted: {p.acceptedAt ? new Date(p.acceptedAt).toLocaleString() : "—"}
+                <button style={styles.dangerBtn} onClick={() => deletePlan(p.id)} title="Delete this plan">
+                  Delete
+                </button>
+              </div>
+
+              <div style={{ marginTop: 10 }}>
+                <b>Today’s status ({todayStr()}):</b>
+                <div style={{ marginTop: 6 }}>
+                  <select value={getTodayStatus(p.id)} onChange={(e) => upsertTodayCheckin(p.id, e.target.value)}>
+                    <option value="">Select…</option>
+                    <option value="not_started">Not started</option>
+                    <option value="in_progress">In progress</option>
+                    <option value="complete">Complete</option>
+                  </select>
                 </div>
               </div>
 
-              <button
-                style={styles.dangerBtn}
-                onClick={() => deletePlan(p.id)}
-                title="Delete this plan"
-              >
-                Delete
-              </button>
-            </div>
+              <div style={{ marginTop: 10 }}>
+  <b>Steps</b>
+  <ol style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+    {(p.steps || []).map((s) => (
+      <li key={s.id} style={{ marginBottom: 10 }}>
+        <div>{s.label}</div>
 
-            <div style={{ marginTop: 10 }}>
-              <b>Today’s status ({todayStr()}):</b>
-              <div style={{ marginTop: 6 }}>
-                <select
-                  value={getTodayStatus(p.id)}
-                  onChange={(e) => upsertTodayCheckin(p.id, e.target.value)}
-                >
-                  <option value="">Select…</option>
-                  <option value="not_started">Not started</option>
-                  <option value="in_progress">In progress</option>
-                  <option value="complete">Complete</option>
-                </select>
-              </div>
+        {/* ✅ Learning links */}
+        {Array.isArray(s.resources) && s.resources.length > 0 && (
+          <div style={styles.resources}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>
+              Learning links
             </div>
-
-            <div style={{ marginTop: 10 }}>
-              <b>Steps</b>
-              <ol style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-                {(p.steps || []).map((s) => (
-                  <li key={s.id} style={{ marginBottom: 6 }}>
-                    {s.label}
-                  </li>
-                ))}
-              </ol>
-            </div>
+            <ul style={styles.linkList}>
+              {s.resources.slice(0, 3).map((r, idx) => (
+                <li key={idx} style={{ marginBottom: 4 }}>
+                  <a href={r.url} target="_blank" rel="noreferrer">
+                    {r.title}
+                  </a>
+                  {r.type ? (
+                    <span style={{ opacity: 0.75 }}> ({r.type})</span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
           </div>
-        ))
+           )}
+         </li>
+        ))}
+      </ol>
+    </div>
+
+            </div>
+          );
+        })
       )}
     </div>
   );

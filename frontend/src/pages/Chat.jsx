@@ -11,7 +11,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 // ---------- localStorage helpers (persistent) ----------
-function loadSaved(key, fallback = []) {
+function loadSaved(key, fallback = null) {
   try {
     const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
@@ -28,7 +28,7 @@ function save(key, value) {
 }
 
 // ---------- sessionStorage helpers (refreshable per visit) ----------
-function loadSession(key, fallback = []) {
+function loadSession(key, fallback = null) {
   try {
     const raw = sessionStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;
@@ -48,16 +48,71 @@ function uid(prefix = "id") {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function buildPlanFromSteps({ focus, steps }) {
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+}
+
+function parseConfidence(input) {
+  const s = String(input || "").trim();
+  const n = Number(s);
+  if (!Number.isFinite(n)) return null;
+  if (n < 1 || n > 10) return null;
+  return Math.round(n * 10) / 10;
+}
+
+function focusLabel(focus) {
+  const f = String(focus || "work");
+  return f.charAt(0).toUpperCase() + f.slice(1);
+}
+
+function titleCase(s) {
+  const t = String(s || "").trim();
+  if (!t) return "";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+function slugify(s) {
+  return String(s || "")
+    .toLowerCase()
+    .trim()
+    .replace(/['"]/g, "")
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+const NEED_OPTIONS = [
+  { key: "interview", label: "Interview confidence" },
+  { key: "presentation", label: "Presentation confidence" },
+  { key: "communication", label: "Communication confidence" },
+  { key: "networking", label: "Networking confidence" },
+  { key: "leadership", label: "Leadership confidence" },
+  { key: "negotiation", label: "Negotiation confidence" },
+  { key: "custom", label: "Other (custom)" },
+];
+
+// ✅ supports steps as strings OR objects {label, resources:[{title,url,type}]}
+function buildPlanFromSteps({ focus, needKey, needLabel, steps }) {
   const id = uid("plan");
-  const title = `${focus[0].toUpperCase() + focus.slice(1)} plan`;
+  const title = `${titleCase(focus)} • ${needLabel || "Plan"}`;
   const goal = "Follow the steps below for the next 7 days.";
   return {
     id,
     title,
     goal,
     focus,
-    steps: steps.map((s, i) => ({ id: `S${i + 1}`, label: String(s) })),
+    needKey,
+    needLabel,
+    steps: steps.map((s, i) => {
+      if (typeof s === "string") return { id: `S${i + 1}`, label: String(s) };
+      return {
+        id: `S${i + 1}`,
+        label: String(s?.label || ""),
+        resources: Array.isArray(s?.resources) ? s.resources : [],
+      };
+    }),
     createdAt: new Date().toISOString(),
     acceptedAt: null,
   };
@@ -95,8 +150,7 @@ function MermaidDiagram({ code }) {
         if (!cancelled && ref.current) ref.current.innerHTML = svg;
       } catch {
         if (!cancelled && ref.current) {
-          ref.current.innerHTML =
-            "<div style='opacity:.8'>Diagram failed to render.</div>";
+          ref.current.innerHTML = "<div style='opacity:.8'>Diagram failed to render.</div>";
         }
       }
     };
@@ -118,9 +172,7 @@ function toHistory(messages, limit = 12) {
       let content = "";
 
       if (m.type === "plan" && m.plan) {
-        content = `Plan: ${m.plan.title}. Steps: ${(m.plan.steps || [])
-          .map((s) => s.label)
-          .join("; ")}`;
+        content = `Plan: ${m.plan.title}. Steps: ${(m.plan.steps || []).map((s) => s.label).join("; ")}`;
       } else {
         content = String(m.text || m.message || "");
       }
@@ -155,6 +207,35 @@ export default function Chat() {
   // ✅ per focus “Plans from this conversation” (sessionStorage)
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
 
+  // ✅ need selection (localStorage)
+  const needKeyStorage = `bc_need_${userId}_${focus}`;
+  const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
+  const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
+
+  // ----- Need state -----
+  const [needKey, setNeedKey] = useState(() => {
+    const active = loadSaved(activeNeedStorage, null);
+    if (active) return String(active);
+    const saved = loadSaved(needKeyStorage, null);
+    return saved ? String(saved) : "interview";
+  });
+
+  const [customNeedLabel, setCustomNeedLabel] = useState(() => {
+    const saved = loadSaved(customNeedLabelStorage, "");
+    return String(saved || "");
+  });
+
+  function currentNeedLabel() {
+    const found = NEED_OPTIONS.find((x) => x.key === needKey);
+    if (needKey === "custom") {
+      return customNeedLabel?.trim() ? titleCase(customNeedLabel.trim()) : "Custom confidence";
+    }
+    return found?.label || "Confidence";
+  }
+
+  // ✅ confidence state per focus + needKey (localStorage)
+  const confidenceKey = `bc_conf_${userId}_${focus}_${needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey}`;
+
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -164,6 +245,14 @@ export default function Chat() {
 
   const [plansHydrated, setPlansHydrated] = useState(false);
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
+
+  // Confidence gating
+  const [awaitingBaseline, setAwaitingBaseline] = useState(false);
+  const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(false);
+
+  // Daily flow gating (progress-first)
+  const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(false);
+  const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(false);
 
   const listRef = useRef(null);
 
@@ -181,10 +270,9 @@ export default function Chat() {
 
   // ✅ IMPORTANT: Refresh "Plans from this conversation" every time you ENTER /chat
   useEffect(() => {
-    sessionStorage.removeItem(convPlansKey); // <-- THIS is what you were missing
-    setConvPlans([]); // start fresh
-
-    setConvPlansHydrated(true); // allow saving after first accept
+    sessionStorage.removeItem(convPlansKey);
+    setConvPlans([]);
+    setConvPlansHydrated(true);
   }, [convPlansKey]);
 
   // Persist chat
@@ -205,8 +293,95 @@ export default function Chat() {
     saveSession(convPlansKey, convPlans);
   }, [convPlansKey, convPlans, convPlansHydrated]);
 
+  // Persist need selection
+  useEffect(() => {
+    save(needKeyStorage, needKey);
+  }, [needKeyStorage, needKey]);
+
+  useEffect(() => {
+    save(customNeedLabelStorage, customNeedLabel);
+  }, [customNeedLabelStorage, customNeedLabel]);
+
+  // Reset gating when need changes (prevents stale “awaiting” flags)
+  useEffect(() => {
+    setAwaitingBaseline(false);
+    setAwaitingBaselineReason(false);
+    setAwaitingDailyProgress(false);
+    setAwaitingDailyConfidence(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needKey, customNeedLabel, focus]);
+
+  // --------- Baseline trigger + daily check-in trigger (per need) ---------
+  useEffect(() => {
+    const conf = loadSaved(confidenceKey, null);
+    const t = todayStr();
+    const fLabel = focusLabel(focus);
+    const nLabel = currentNeedLabel();
+
+    // If need is custom but label empty, don't start baseline flow yet
+    if (needKey === "custom" && !customNeedLabel.trim()) return;
+
+    // If no baseline yet -> ask baseline number (for this need)
+    if (!conf || typeof conf?.baseline !== "number") {
+      if (!awaitingBaseline && !awaitingBaselineReason) {
+        setAwaitingBaseline(true);
+        setAwaitingDailyProgress(false);
+        setAwaitingDailyConfidence(false);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "text",
+            mode: "coach",
+            message:
+              `Before I create your plan for **${nLabel}** (${fLabel}), I want to understand where you are now.\n` +
+              `On a scale from 1–10, what is your current confidence level?`,
+          },
+        ]);
+      }
+      return;
+    }
+
+    // Baseline exists: if we haven't checked in today, ask PROGRESS first
+    const lastChecked = String(conf?.lastCheckDate || "");
+    if (lastChecked !== t) {
+      if (!awaitingDailyProgress && !awaitingDailyConfidence) {
+        setAwaitingDailyProgress(true);
+        setAwaitingBaseline(false);
+        setAwaitingBaselineReason(false);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "daily_progress",
+            mode: "coach",
+            message: `Quick check-in 🌱\nDid you get a chance to work on your **${nLabel}** plan since last time?`,
+          },
+        ]);
+      }
+    } else {
+      setAwaitingDailyProgress(false);
+      setAwaitingDailyConfidence(false);
+      setAwaitingBaseline(false);
+      setAwaitingBaselineReason(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confidenceKey, focus, needKey, customNeedLabel]);
+
   const acceptPlan = (planObj) => {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
+
+    // Mark this need as the active need for daily check-ins (per focus)
+    const activeNeedKey =
+      accepted?.needKey === "custom"
+        ? `custom_${slugify(accepted?.needLabel) || "custom"}`
+        : accepted?.needKey || needKey;
+
+    save(activeNeedStorage, activeNeedKey);
 
     // 1) Global plans (for /plans)
     setPlans((prev) => {
@@ -236,7 +411,7 @@ export default function Chat() {
         role: "assistant",
         type: "text",
         mode: "coach",
-        message: "Saved ✅ Added to this conversation and your All Plans page.",
+        message: `Saved ✅ Added to this conversation and your All Plans page.\n(Active need: ${accepted.needLabel || currentNeedLabel()})`,
       },
     ]);
   };
@@ -255,79 +430,260 @@ export default function Chat() {
     ]);
   };
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
+  async function callCoachBackend(outboundText, currentMessages) {
+    const history = toHistory(currentMessages, 12);
 
-    const userText = input.trim();
-    setInput("");
-    setLoading(true);
+    const res = await axios.post(`${API_BASE}/chat`, {
+      user_id: userId,
+      focus,
+      message: outboundText,
+      history,
+    });
 
-    const userMsgObj = { id: uid("msg"), role: "user", text: userText };
-    setMessages((prev) => [...prev, userMsgObj]);
+    const mode = String(res.data?.mode || "chat").toLowerCase();
+    const message = String(res.data?.message || "").trim();
+    const planRaw = Array.isArray(res.data?.plan) ? res.data.plan : [];
 
-    try {
-      const history = toHistory([...messages, userMsgObj], 12);
-
-      const res = await axios.post(`${API_BASE}/chat`, {
-        user_id: userId,
-        focus,
-        message: userText,
-        history,
-      });
-
-      const mode = String(res.data?.mode || "chat").toLowerCase();
-      const message = String(res.data?.message || "").trim();
-      const planSteps = Array.isArray(res.data?.plan) ? res.data.plan.map(String) : [];
-
-      if (message) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "text",
-            mode: mode === "coach" ? "coach" : "chat",
-            message,
-          },
-        ]);
-      }
-
-      const cleanedSteps = planSteps.filter((p) => p.trim()).slice(0, 6);
-      if (cleanedSteps.length > 0) {
-        const planObj = buildPlanFromSteps({ focus, steps: cleanedSteps });
-        const diagram = planToMermaid(planObj);
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "plan",
-            mode: "coach",
-            plan: planObj,
-            mermaid: diagram,
-            accepted: false,
-          },
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "plan_accept",
-            mode: "coach",
-            planId: planObj.id,
-            accepted: false,
-          },
-        ]);
-      }
-    } catch {
+    if (message) {
       setMessages((prev) => [
         ...prev,
         {
           id: uid("msg"),
           role: "assistant",
           type: "text",
-          mode: "chat",
-          message: "Sorry — something went wrong while talking to the coach.",
+          mode: mode === "coach" ? "coach" : "chat",
+          message,
         },
+      ]);
+    }
+
+    const cleanedSteps = planRaw
+      .map((x) => (typeof x === "string" ? x.trim() : x))
+      .filter((x) => (typeof x === "string" ? x.trim() : String(x?.label || "").trim()))
+      .slice(0, 6);
+
+    if (cleanedSteps.length > 0) {
+      const planObj = buildPlanFromSteps({
+        focus,
+        needKey,
+        needLabel: currentNeedLabel(),
+        steps: cleanedSteps,
+      });
+      const diagram = planToMermaid(planObj);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "plan",
+          mode: "coach",
+          plan: planObj,
+          mermaid: diagram,
+          accepted: false,
+        },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "plan_accept",
+          mode: "coach",
+          planId: planObj.id,
+          accepted: false,
+        },
+      ]);
+    }
+  }
+
+  function saveConfidence(level) {
+    const t = todayStr();
+    const conf = loadSaved(confidenceKey, {}) || {};
+    const prevBaseline = typeof conf?.baseline === "number" ? conf.baseline : null;
+
+    const updated = {
+      baseline: prevBaseline ?? level,
+      lastCheckDate: t,
+      history: Array.isArray(conf?.history) ? conf.history.slice() : [],
+      needLabel: currentNeedLabel(),
+      focus,
+    };
+
+    updated.history = updated.history.filter((x) => x?.date !== t);
+    updated.history.push({ date: t, level });
+
+    save(confidenceKey, updated);
+
+    return { updated, prevBaseline };
+  }
+
+  // Buttons for daily progress
+  const handleDailyProgress = async (didProgress) => {
+    if (loading) return;
+
+    const fLabel = focusLabel(focus);
+    const nLabel = currentNeedLabel();
+
+    setAwaitingDailyProgress(false);
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: uid("msg"),
+        role: "user",
+        text: didProgress ? "Yes, I did." : "Not yet.",
+        type: "text",
+      },
+    ]);
+
+    if (didProgress) {
+      setAwaitingDailyConfidence(true);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: `Nice — that matters ✅\nOn the same 1–10 scale, what’s your confidence for **${nLabel}** right now?`,
+        },
+      ]);
+      return;
+    }
+
+    // no progress -> time management tips + tiny step (backend)
+    setLoading(true);
+    try {
+      const nextMessages = [...messages, { id: uid("msg"), role: "user", text: "Not yet." }];
+
+      await callCoachBackend(
+        `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". ` +
+          `Please give 2–3 practical time-management tips and a tiny next step I can do in 5 minutes. ` +
+          `If you propose tasks, include 2–3 learning links per task.`,
+        nextMessages
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const sendMessage = async () => {
+    if (!input.trim() || loading) return;
+
+    // If custom need is selected but empty, force user to name it first
+    if (needKey === "custom" && !customNeedLabel.trim()) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: "Quick one — what would you like to call this confidence area? (Example: “Executive presence”)",
+        },
+      ]);
+      return;
+    }
+
+    const userText = input.trim();
+    setInput("");
+    setLoading(true);
+
+    const userMsgObj = { id: uid("msg"), role: "user", text: userText };
+    const nextMessages = [...messages, userMsgObj];
+    setMessages(nextMessages);
+
+    const fLabel = focusLabel(focus);
+    const nLabel = currentNeedLabel();
+
+    try {
+      // --------- Baseline reason flow ----------
+      if (awaitingBaselineReason) {
+        setAwaitingBaselineReason(false);
+
+        await callCoachBackend(
+          `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. ` +
+            `Please: 1) respond with empathy, 2) give 2–3 suggestions, 3) include 2–3 learning links per task, and 4) propose a short plan for "${nLabel}".`,
+          nextMessages
+        );
+        return;
+      }
+
+      // --------- Baseline number flow ----------
+      if (awaitingBaseline) {
+        const level = parseConfidence(userText);
+        if (level == null) {
+          setMessages((prev) => [
+            ...prev,
+            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+          ]);
+          return;
+        }
+
+        saveConfidence(level);
+
+        setAwaitingBaseline(false);
+        setAwaitingBaselineReason(true);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "text",
+            mode: "coach",
+            message:
+              `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\n` +
+              `What’s the main reason it feels like a ${level} (and not higher)?`,
+          },
+        ]);
+        return;
+      }
+
+      // --------- Daily confidence flow (after progress = yes) ----------
+      if (awaitingDailyConfidence) {
+        const level = parseConfidence(userText);
+        if (level == null) {
+          setMessages((prev) => [
+            ...prev,
+            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+          ]);
+          return;
+        }
+
+        const { updated } = saveConfidence(level);
+        setAwaitingDailyConfidence(false);
+
+        const delta = Math.round((level - updated.baseline) * 10) / 10;
+        const deltaText = delta > 0 ? `(+${delta})` : delta < 0 ? `(${delta})` : "(no change)";
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "text",
+            mode: "coach",
+            message: `Thank you — noted ${level}/10 ${deltaText} compared to your baseline (${updated.baseline}/10) for **${nLabel}**.`,
+          },
+        ]);
+
+        await callCoachBackend(
+          `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. ` +
+            `Please reflect the change and suggest what to do next. If you propose tasks, include 2–3 learning links per task.`,
+          nextMessages
+        );
+        return;
+      }
+
+      // --------- Normal chat flow ----------
+      await callCoachBackend(
+        // Give backend context about the current need (works even if backend ignores it)
+        `[Need: ${nLabel}] ${userText}`,
+        nextMessages
+      );
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: "Sorry — something went wrong while talking to the coach." },
       ]);
     } finally {
       setLoading(false);
@@ -341,19 +697,14 @@ export default function Chat() {
 
   const styles = {
     page: { maxWidth: 1200, margin: "0 auto", padding: 16, color: "var(--text-primary, #111827)" },
-    layout: {
-      display: "grid",
-      gridTemplateColumns: "minmax(0, 1fr) 360px",
-      gap: 16,
-      alignItems: "start",
-    },
+    layout: { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 360px", gap: 16, alignItems: "start" },
     panel: {
       marginTop: 12,
       marginBottom: 12,
       border: "1px solid var(--border-soft, #e5e7eb)",
       borderRadius: 12,
       padding: 12,
-      height: "calc(100vh - 220px)",
+      height: "calc(100vh - 240px)",
       minHeight: 420,
       overflowY: "auto",
       background: "var(--bg-page, #ffffff)",
@@ -414,12 +765,7 @@ export default function Chat() {
       padding: "0 12px",
       cursor: "pointer",
     },
-    card: {
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      borderRadius: 12,
-      padding: 10,
-      background: "var(--bg-page, #ffffff)",
-    },
+    card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "var(--bg-page, #ffffff)" },
     badge: {
       display: "inline-block",
       fontSize: 12,
@@ -440,22 +786,50 @@ export default function Chat() {
       cursor: loading ? "not-allowed" : "pointer",
       opacity: loading ? 0.7 : 1,
     },
+    hint: { fontSize: 12, marginTop: 6, opacity: 0.85, color: "var(--text-muted, #6b7280)" },
+    resources: { marginTop: 6, fontSize: 13, opacity: 0.92 },
+    linkList: { margin: "6px 0 0", paddingLeft: 18 },
+    progressBtns: { display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" },
+    needRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+    select: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "var(--bg-page, #ffffff)",
+      color: "var(--text-primary, #111827)",
+    },
+    smallInput: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "var(--bg-page, #ffffff)",
+      color: "var(--text-primary, #111827)",
+      minWidth: 220,
+    },
   };
+
+  const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
+  const needLabel = currentNeedLabel();
+
+  const activeNeedHint = (() => {
+    const active = loadSaved(activeNeedStorage, null);
+    if (!active) return null;
+    return String(active);
+  })();
 
   return (
     <div style={styles.page}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
-      >
-        <h2 style={{ margin: 0 }}>Build Confidence</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <h2 style={{ margin: 0 }}>Build Confidence</h2>
+          <div style={{ ...styles.muted, marginTop: 6 }}>
+            Focus: <b>{focusLabel(focus)}</b> • Need: <b>{needLabel}</b>
+          </div>
+        </div>
 
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => navigate("/plans")} style={styles.btn}>
             Your All Plans
           </button>
@@ -468,15 +842,51 @@ export default function Chat() {
         </div>
       </div>
 
+      {/* Need selector */}
+      <div style={{ marginTop: 12, ...styles.card }}>
+        <div style={styles.needRow}>
+          <div style={{ fontWeight: 800 }}>What confidence area are we working on?</div>
+
+          <select
+            value={needKey}
+            onChange={(e) => setNeedKey(e.target.value)}
+            style={styles.select}
+            disabled={loading}
+            title="Select a specific need (each need has its own baseline)"
+          >
+            {NEED_OPTIONS.map((n) => (
+              <option key={n.key} value={n.key}>
+                {n.label}
+              </option>
+            ))}
+          </select>
+
+          {needKey === "custom" && (
+            <>
+              <input
+                value={customNeedLabel}
+                onChange={(e) => setCustomNeedLabel(e.target.value)}
+                placeholder='Name it (e.g., "Executive presence")'
+                style={styles.smallInput}
+                disabled={loading}
+              />
+              <span style={styles.muted}>Each custom name gets its own confidence baseline.</span>
+            </>
+          )}
+
+          {activeNeedHint && (
+            <span style={{ ...styles.muted, marginLeft: "auto" }}>
+              Active daily check-in need: <b>{activeNeedHint}</b>
+            </span>
+          )}
+        </div>
+      </div>
+
       <div className="chat-layout" style={styles.layout}>
         {/* LEFT: Chat */}
         <div>
           <div ref={listRef} style={styles.panel}>
-            {messages.length === 0 && (
-              <div style={styles.muted}>
-                Say what’s on your mind — I’ll respond like a real conversation (and give tips only when helpful).
-              </div>
-            )}
+            {messages.length === 0 && <div style={styles.muted}>Say what’s on your mind — I’ll respond like a real conversation.</div>}
 
             {messages.map((m, i) => {
               const isUser = m.role === "user";
@@ -485,24 +895,31 @@ export default function Chat() {
 
               return (
                 <div key={m.id || i} style={{ display: "flex", alignItems: "flex-start", marginBottom: 12 }}>
-                  <img
-                    src={avatarImg}
-                    alt={name}
-                    width={36}
-                    height={36}
-                    style={{ borderRadius: "50%", marginRight: 10 }}
-                  />
+                  <img src={avatarImg} alt={name} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
 
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 700, marginBottom: 6 }}>{name}</div>
 
                     {isUser ? (
                       <div style={styles.bubbleUser}>{m.text}</div>
+                    ) : m.type === "daily_progress" ? (
+                      <div style={styles.bubbleCoach}>
+                        <div>{m.message}</div>
+                        <div style={styles.progressBtns}>
+                          <button style={styles.primaryBtn} onClick={() => handleDailyProgress(true)}>
+                            Yes, I did
+                          </button>
+                          <button style={styles.btn} onClick={() => handleDailyProgress(false)}>
+                            Not yet
+                          </button>
+                        </div>
+                      </div>
                     ) : m.type === "plan" ? (
                       <div style={styles.bubbleCoach}>
                         <div style={{ fontWeight: 800, marginBottom: 6 }}>
                           {m.plan?.title || "Plan"}
                           {m.plan?.focus && <span style={styles.badge}>{m.plan.focus}</span>}
+                          {m.plan?.needLabel && <span style={styles.badge}>{m.plan.needLabel}</span>}
                         </div>
 
                         {m.plan?.goal && <div style={{ marginBottom: 10, opacity: 0.9 }}>{m.plan.goal}</div>}
@@ -515,8 +932,25 @@ export default function Chat() {
                           <div style={{ marginTop: 8 }}>
                             <ol style={{ margin: 0, paddingLeft: 18 }}>
                               {m.plan.steps.map((s) => (
-                                <li key={s.id} style={{ marginBottom: 6 }}>
-                                  {s.label}
+                                <li key={s.id} style={{ marginBottom: 10 }}>
+                                  <div>{s.label}</div>
+
+                                  {/* Learning links per step (if backend provides) */}
+                                  {Array.isArray(s.resources) && s.resources.length > 0 && (
+                                    <div style={styles.resources}>
+                                      <div style={{ fontWeight: 700, marginBottom: 4 }}>Learning links</div>
+                                      <ul style={styles.linkList}>
+                                        {s.resources.slice(0, 3).map((r, idx) => (
+                                          <li key={idx} style={{ marginBottom: 4 }}>
+                                            <a href={r.url} target="_blank" rel="noreferrer">
+                                              {r.title}
+                                            </a>
+                                            {r.type ? <span style={{ opacity: 0.75 }}> ({r.type})</span> : null}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
                                 </li>
                               ))}
                             </ol>
@@ -559,13 +993,7 @@ export default function Chat() {
 
             {loading && (
               <div style={{ display: "flex", alignItems: "center", opacity: 0.85, marginTop: 8 }}>
-                <img
-                  src={coach.img}
-                  alt={coach.label}
-                  width={36}
-                  height={36}
-                  style={{ borderRadius: "50%", marginRight: 10 }}
-                />
+                <img src={coach.img} alt={coach.label} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
                 <div>
                   <div style={{ fontWeight: 700 }}>Coach</div>
                   <div style={styles.muted}>typing…</div>
@@ -577,12 +1005,35 @@ export default function Chat() {
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Say something…"
+            placeholder={
+              awaitingBaseline
+                ? "Reply with a number 1–10…"
+                : awaitingDailyConfidence
+                ? "Reply with a number 1–10…"
+                : awaitingBaselineReason
+                ? "Tell me the main reason…"
+                : awaitingDailyProgress
+                ? "Use the buttons above…"
+                : "Say something…"
+            }
             style={styles.input}
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+            disabled={awaitingDailyProgress} // buttons-only for daily progress question
           />
 
-          <button onClick={sendMessage} disabled={loading} style={styles.sendBtn}>
+          {(showConfidenceHint || awaitingBaselineReason) && (
+            <div style={styles.hint}>
+              {showConfidenceHint ? (
+                <>
+                  Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).
+                </>
+              ) : (
+                <>Tip: one sentence is enough 🙂</>
+              )}
+            </div>
+          )}
+
+          <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
             {loading ? "Sending…" : "Send"}
           </button>
         </div>
