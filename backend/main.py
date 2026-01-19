@@ -9,15 +9,29 @@ from routers.users import router as users_router
 
 app = FastAPI(title="Build Confidence API")
 
-# CORS (frontend → backend)
+# =========================
+# CORS (Frontend → Backend)
+# =========================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "https://build-confidence-app.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# register routers
+# =========================
+# Health check (optional)
+# =========================
+@app.get("/")
+def health():
+    return {"status": "ok", "service": "build-confidence-backend"}
+
+# =========================
+# Register routers
+# =========================
 app.include_router(chat_router)
 app.include_router(users_router)
