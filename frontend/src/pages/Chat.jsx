@@ -27,7 +27,7 @@ function save(key, value) {
   }
 }
 
-// ---------- sessionStorage helpers (refreshable per visit) ----------
+// ---------- sessionStorage helpers (per visit / refreshable) ----------
 function loadSession(key, fallback = null) {
   try {
     const raw = sessionStorage.getItem(key);
@@ -81,6 +81,12 @@ function slugify(s) {
     .replace(/['"]/g, "")
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+// ✅ key fix: treat greetings as NOT "user spoke"
+function isGreeting(text) {
+  const t = String(text || "").trim().toLowerCase();
+  return /^(hi|hello|hey|hiya|yo)[!.\s]*$/.test(t);
 }
 
 const NEED_OPTIONS = [
@@ -184,6 +190,19 @@ function toHistory(messages, limit = 12) {
     .filter(Boolean);
 }
 
+// ✅ Replace/update system messages instead of appending stale ones
+function upsertSystemMessage(setMessages, msg) {
+  setMessages((prev) => {
+    const idx = prev.findIndex((m) => m.id === msg.id);
+    if (idx >= 0) {
+      const next = prev.slice();
+      next[idx] = { ...next[idx], ...msg };
+      return next;
+    }
+    return [...prev, msg];
+  });
+}
+
 export default function Chat() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getProfile() || {});
@@ -198,14 +217,6 @@ export default function Chat() {
 
   const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
-
-  const chatKey = `bc_chat_${userId}_${focus}`;
-
-  // ✅ persistent across app (localStorage)
-  const plansKey = `bc_plans_${userId}`;
-
-  // ✅ per focus “Plans from this conversation” (sessionStorage)
-  const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
 
   // ✅ need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
@@ -233,12 +244,32 @@ export default function Chat() {
     return found?.label || "Confidence";
   }
 
+  const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
+
+  // ✅ per-need chat storage
+  const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
+
+  // ✅ persistent across app
+  const plansKey = `bc_plans_${userId}`;
+
+  // ✅ per focus “Plans from this conversation” (sessionStorage)
+  const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
+
   // ✅ confidence state per focus + needKey (localStorage)
-  const confidenceKey = `bc_conf_${userId}_${focus}_${needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey}`;
+  const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
+
+  // ✅ Only start baseline/daily prompts after user speaks this visit
+  const hasSpokenKey = `bc_has_spoken_${userId}_${focus}_${needSlug}`;
+  const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(hasSpokenKey, false));
+  useEffect(() => {
+    saveSession(hasSpokenKey, hasUserSpoken);
+  }, [hasSpokenKey, hasUserSpoken]);
 
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  const sendingRef = useRef(false);
 
   const [plans, setPlans] = useState([]);
   const [convPlans, setConvPlans] = useState([]);
@@ -256,19 +287,19 @@ export default function Chat() {
 
   const listRef = useRef(null);
 
-  // Load per-focus chat messages (persistent)
+  // Load per-need chat messages
   useEffect(() => {
     setMessages(loadSaved(chatKey, []));
   }, [chatKey]);
 
-  // ✅ Load global plans from localStorage
+  // Load global plans
   useEffect(() => {
     const p = loadSaved(plansKey, []);
     setPlans(Array.isArray(p) ? p : []);
     setPlansHydrated(true);
   }, [plansKey]);
 
-  // ✅ IMPORTANT: Refresh "Plans from this conversation" every time you ENTER /chat
+  // Refresh "Plans from this conversation" every time you ENTER /chat
   useEffect(() => {
     sessionStorage.removeItem(convPlansKey);
     setConvPlans([]);
@@ -302,44 +333,56 @@ export default function Chat() {
     save(customNeedLabelStorage, customNeedLabel);
   }, [customNeedLabelStorage, customNeedLabel]);
 
-  // Reset gating when need changes (prevents stale “awaiting” flags)
+  // Reset gating when need changes + remove stale system prompts
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
     setAwaitingDailyProgress(false);
     setAwaitingDailyConfidence(false);
+
+    setMessages((prev) =>
+      prev.filter(
+        (m) =>
+          !(
+            m.type === "system" &&
+            (m.kind === "baseline_prompt" ||
+              m.kind === "baseline_reason_prompt" ||
+              m.kind === "daily_prompt" ||
+              m.kind === "daily_conf_prompt")
+          )
+      )
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
-  // --------- Baseline trigger + daily check-in trigger (per need) ---------
+  // Baseline trigger + daily check-in trigger (per need)
   useEffect(() => {
+    if (!hasUserSpoken) return;
+
     const conf = loadSaved(confidenceKey, null);
     const t = todayStr();
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
 
-    // If need is custom but label empty, don't start baseline flow yet
     if (needKey === "custom" && !customNeedLabel.trim()) return;
 
-    // If no baseline yet -> ask baseline number (for this need)
+    // If no baseline yet -> ask baseline number
     if (!conf || typeof conf?.baseline !== "number") {
       if (!awaitingBaseline && !awaitingBaselineReason) {
         setAwaitingBaseline(true);
         setAwaitingDailyProgress(false);
         setAwaitingDailyConfidence(false);
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "text",
-            mode: "coach",
-            message:
-              `Before I create your plan for **${nLabel}** (${fLabel}), I want to understand where you are now.\n` +
-              `On a scale from 1–10, what is your current confidence level?`,
-          },
-        ]);
+        upsertSystemMessage(setMessages, {
+          id: `system_baseline_${focus}_${needSlug}`,
+          role: "assistant",
+          type: "system",
+          kind: "baseline_prompt",
+          mode: "coach",
+          message:
+            `Before I create your plan for **${nLabel}** (${fLabel}), I want to understand where you are now.\n` +
+            `On a scale from 1–10, what is your current confidence level?`,
+        });
       }
       return;
     }
@@ -352,16 +395,15 @@ export default function Chat() {
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(false);
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "daily_progress",
-            mode: "coach",
-            message: `Quick check-in 🌱\nDid you get a chance to work on your **${nLabel}** plan since last time?`,
-          },
-        ]);
+        // ✅ IMPORTANT: use type "daily_progress" so UI shows buttons
+        upsertSystemMessage(setMessages, {
+          id: `system_daily_${focus}_${needSlug}`,
+          role: "assistant",
+          type: "daily_progress",
+          kind: "daily_prompt",
+          mode: "coach",
+          message: `Quick check-in 🌱\nDid you get a chance to work on your **${nLabel}** plan since last time?`,
+        });
       }
     } else {
       setAwaitingDailyProgress(false);
@@ -370,12 +412,11 @@ export default function Chat() {
       setAwaitingBaselineReason(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [confidenceKey, focus, needKey, customNeedLabel]);
+  }, [hasUserSpoken, confidenceKey, focus, needKey, customNeedLabel]);
 
   const acceptPlan = (planObj) => {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
 
-    // Mark this need as the active need for daily check-ins (per focus)
     const activeNeedKey =
       accepted?.needKey === "custom"
         ? `custom_${slugify(accepted?.needLabel) || "custom"}`
@@ -383,19 +424,19 @@ export default function Chat() {
 
     save(activeNeedStorage, activeNeedKey);
 
-    // 1) Global plans (for /plans)
+    // Global plans (for /plans)
     setPlans((prev) => {
       const dedup = prev.filter((p) => p.id !== accepted.id);
       return [accepted, ...dedup];
     });
 
-    // 2) Plans from this conversation (sidebar)
+    // Plans from this conversation
     setConvPlans((prev) => {
       const dedup = prev.filter((p) => p.id !== accepted.id);
       return [accepted, ...dedup];
     });
 
-    // Mark accepted in chat (hide buttons)
+    // Mark accepted in chat
     setMessages((prev) =>
       prev.map((m) => {
         if (m.type === "plan" && m.plan?.id === planObj.id) return { ...m, accepted: true };
@@ -411,7 +452,9 @@ export default function Chat() {
         role: "assistant",
         type: "text",
         mode: "coach",
-        message: `Saved ✅ Added to this conversation and your All Plans page.\n(Active need: ${accepted.needLabel || currentNeedLabel()})`,
+        message: `Saved ✅ Added to this conversation and your All Plans page.\n(Active need: ${
+          accepted.needLabel || currentNeedLabel()
+        })`,
       },
     ]);
   };
@@ -436,6 +479,8 @@ export default function Chat() {
     const res = await axios.post(`${API_BASE}/chat`, {
       user_id: userId,
       focus,
+      need_key: needKey,
+      need_label: currentNeedLabel(),
       message: outboundText,
       history,
     });
@@ -515,9 +560,8 @@ export default function Chat() {
     return { updated, prevBaseline };
   }
 
-  // Buttons for daily progress
   const handleDailyProgress = async (didProgress) => {
-    if (loading) return;
+    if (loading || sendingRef.current) return;
 
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
@@ -536,20 +580,17 @@ export default function Chat() {
 
     if (didProgress) {
       setAwaitingDailyConfidence(true);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "coach",
-          message: `Nice — that matters ✅\nOn the same 1–10 scale, what’s your confidence for **${nLabel}** right now?`,
-        },
-      ]);
+      upsertSystemMessage(setMessages, {
+        id: `system_daily_conf_${focus}_${needSlug}`,
+        role: "assistant",
+        type: "system",
+        kind: "daily_conf_prompt",
+        mode: "coach",
+        message: `Nice — that matters ✅\nOn the same 1–10 scale, what’s your confidence for **${nLabel}** right now?`,
+      });
       return;
     }
 
-    // no progress -> time management tips + tiny step (backend)
     setLoading(true);
     try {
       const nextMessages = [...messages, { id: uid("msg"), role: "user", text: "Not yet." }];
@@ -566,9 +607,9 @@ export default function Chat() {
   };
 
   const sendMessage = async () => {
+    if (sendingRef.current) return;
     if (!input.trim() || loading) return;
 
-    // If custom need is selected but empty, force user to name it first
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
@@ -583,9 +624,16 @@ export default function Chat() {
       return;
     }
 
+    sendingRef.current = true;
+
     const userText = input.trim();
     setInput("");
     setLoading(true);
+
+    // ✅ KEY FIX: only mark "hasUserSpoken" if not a greeting
+    if (!isGreeting(userText)) {
+      setHasUserSpoken(true);
+    }
 
     const userMsgObj = { id: uid("msg"), role: "user", text: userText };
     const nextMessages = [...messages, userMsgObj];
@@ -595,7 +643,6 @@ export default function Chat() {
     const nLabel = currentNeedLabel();
 
     try {
-      // --------- Baseline reason flow ----------
       if (awaitingBaselineReason) {
         setAwaitingBaselineReason(false);
 
@@ -607,13 +654,18 @@ export default function Chat() {
         return;
       }
 
-      // --------- Baseline number flow ----------
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+            },
           ]);
           return;
         }
@@ -623,48 +675,40 @@ export default function Chat() {
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(true);
 
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "text",
-            mode: "coach",
-            message:
-              `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\n` +
-              `What’s the main reason it feels like a ${level} (and not higher)?`,
-          },
-        ]);
+        // ✅ remove old baseline prompt so it doesn't look like it's repeating
+        setMessages((prev) => prev.filter((m) => !(m.type === "system" && m.kind === "baseline_prompt")));
+
+        upsertSystemMessage(setMessages, {
+          id: `system_baseline_reason_${focus}_${needSlug}`,
+          role: "assistant",
+          type: "system",
+          kind: "baseline_reason_prompt",
+          mode: "coach",
+          message:
+            `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\n` +
+            `What’s the main reason it feels like a ${level} (and not higher)?`,
+        });
         return;
       }
 
-      // --------- Daily confidence flow (after progress = yes) ----------
       if (awaitingDailyConfidence) {
         const level = parseConfidence(userText);
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+            },
           ]);
           return;
         }
 
-        const { updated } = saveConfidence(level);
+        saveConfidence(level);
         setAwaitingDailyConfidence(false);
-
-        const delta = Math.round((level - updated.baseline) * 10) / 10;
-        const deltaText = delta > 0 ? `(+${delta})` : delta < 0 ? `(${delta})` : "(no change)";
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "text",
-            mode: "coach",
-            message: `Thank you — noted ${level}/10 ${deltaText} compared to your baseline (${updated.baseline}/10) for **${nLabel}**.`,
-          },
-        ]);
 
         await callCoachBackend(
           `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. ` +
@@ -674,19 +718,21 @@ export default function Chat() {
         return;
       }
 
-      // --------- Normal chat flow ----------
-      await callCoachBackend(
-        // Give backend context about the current need (works even if backend ignores it)
-        `[Need: ${nLabel}] ${userText}`,
-        nextMessages
-      );
+      await callCoachBackend(`[Need: ${nLabel}] ${userText}`, nextMessages);
     } catch {
       setMessages((prev) => [
         ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: "Sorry — something went wrong while talking to the coach." },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "chat",
+          message: "Sorry — something went wrong while talking to the coach.",
+        },
       ]);
     } finally {
       setLoading(false);
+      sendingRef.current = false;
     }
   };
 
@@ -837,7 +883,7 @@ export default function Chat() {
             Change focus
           </button>
           <button onClick={clearChat} style={styles.btn}>
-            Clear chat (current focus)
+            Clear chat (current need)
           </button>
         </div>
       </div>
@@ -935,7 +981,6 @@ export default function Chat() {
                                 <li key={s.id} style={{ marginBottom: 10 }}>
                                   <div>{s.label}</div>
 
-                                  {/* Learning links per step (if backend provides) */}
                                   {Array.isArray(s.resources) && s.resources.length > 0 && (
                                     <div style={styles.resources}>
                                       <div style={{ fontWeight: 700, marginBottom: 4 }}>Learning links</div>
@@ -1017,8 +1062,13 @@ export default function Chat() {
                 : "Say something…"
             }
             style={styles.input}
-            onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-            disabled={awaitingDailyProgress} // buttons-only for daily progress question
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (!e.repeat) sendMessage();
+              }
+            }}
+            disabled={awaitingDailyProgress}
           />
 
           {(showConfidenceHint || awaitingBaselineReason) && (
