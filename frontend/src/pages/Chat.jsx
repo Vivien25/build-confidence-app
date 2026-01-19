@@ -50,9 +50,7 @@ function uid(prefix = "id") {
 
 function todayStr() {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
-    d.getDate()
-  ).padStart(2, "0")}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
 function parseConfidence(input) {
@@ -87,6 +85,12 @@ function slugify(s) {
 function isGreeting(text) {
   const t = String(text || "").trim().toLowerCase();
   return /^(hi|hello|hey|hiya|yo)[!.\s]*$/.test(t);
+}
+
+// ✅ NEW: detect plan intent (so we can delay baseline questions)
+function userAskedForPlan(text) {
+  const t = String(text || "").toLowerCase();
+  return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule)\b/.test(t);
 }
 
 const NEED_OPTIONS = [
@@ -265,6 +269,13 @@ export default function Chat() {
     saveSession(hasSpokenKey, hasUserSpoken);
   }, [hasSpokenKey, hasUserSpoken]);
 
+  // ✅ NEW: only start baseline prompts after the user asks for a plan (this visit)
+  const readyKey = `bc_ready_for_baseline_${userId}_${focus}_${needSlug}`;
+  const [readyForBaseline, setReadyForBaseline] = useState(() => loadSession(readyKey, false));
+  useEffect(() => {
+    saveSession(readyKey, readyForBaseline);
+  }, [readyKey, readyForBaseline]);
+
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -340,6 +351,9 @@ export default function Chat() {
     setAwaitingDailyProgress(false);
     setAwaitingDailyConfidence(false);
 
+    // ✅ allow short chat again when switching needs (fresh visit behavior)
+    setReadyForBaseline(false);
+
     setMessages((prev) =>
       prev.filter(
         (m) =>
@@ -357,7 +371,9 @@ export default function Chat() {
 
   // Baseline trigger + daily check-in trigger (per need)
   useEffect(() => {
-    if (!hasUserSpoken) return;
+    // ✅ NEW: do NOT prompt baseline at the beginning.
+    // Only prompt once the user has spoken AND asked for a plan (readyForBaseline).
+    if (!hasUserSpoken || !readyForBaseline) return;
 
     const conf = loadSaved(confidenceKey, null);
     const t = todayStr();
@@ -412,7 +428,7 @@ export default function Chat() {
       setAwaitingBaselineReason(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasUserSpoken, confidenceKey, focus, needKey, customNeedLabel]);
+  }, [hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
 
   const acceptPlan = (planObj) => {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
@@ -539,6 +555,23 @@ export default function Chat() {
     }
   }
 
+  // ✅ NEW: silently sync baseline to backend to prevent backend mis-parsing "1) 2) 3)" etc.
+  async function syncBaselineToBackend(level, currentMessages) {
+    try {
+      const history = toHistory(currentMessages, 12);
+      await axios.post(`${API_BASE}/chat`, {
+        user_id: userId,
+        focus,
+        need_key: needKey,
+        need_label: currentNeedLabel(),
+        message: String(level), // IMPORTANT: only the number
+        history,
+      });
+    } catch {
+      // ignore (frontend still works)
+    }
+  }
+
   function saveConfidence(level) {
     const t = todayStr();
     const conf = loadSaved(confidenceKey, {}) || {};
@@ -597,8 +630,8 @@ export default function Chat() {
 
       await callCoachBackend(
         `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". ` +
-          `Please give 2–3 practical time-management tips and a tiny next step I can do in 5 minutes. ` +
-          `If you propose tasks, include 2–3 learning links per task.`,
+          `Please give practical time-management tips and one tiny next step I can do in 5 minutes. ` +
+          `If you propose tasks, include learning links per task.`,
         nextMessages
       );
     } finally {
@@ -630,9 +663,14 @@ export default function Chat() {
     setInput("");
     setLoading(true);
 
-    // ✅ KEY FIX: only mark "hasUserSpoken" if not a greeting
+    // ✅ only mark "hasUserSpoken" if not a greeting
     if (!isGreeting(userText)) {
       setHasUserSpoken(true);
+    }
+
+    // ✅ NEW: unlock baseline prompts only after user asks for a plan
+    if (!readyForBaseline && userAskedForPlan(userText)) {
+      setReadyForBaseline(true);
     }
 
     const userMsgObj = { id: uid("msg"), role: "user", text: userText };
@@ -646,9 +684,10 @@ export default function Chat() {
       if (awaitingBaselineReason) {
         setAwaitingBaselineReason(false);
 
+        // ✅ safer text: no numbered "1) 2) 3)" which can confuse the backend
         await callCoachBackend(
           `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. ` +
-            `Please: 1) respond with empathy, 2) give 2–3 suggestions, 3) include 2–3 learning links per task, and 4) propose a short plan for "${nLabel}".`,
+            `Please respond with empathy, give a few suggestions, include learning links, and propose a short plan for "${nLabel}".`,
           nextMessages
         );
         return;
@@ -672,6 +711,9 @@ export default function Chat() {
 
         saveConfidence(level);
 
+        // ✅ NEW: keep backend baseline in sync
+        await syncBaselineToBackend(level, nextMessages);
+
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(true);
 
@@ -684,9 +726,7 @@ export default function Chat() {
           type: "system",
           kind: "baseline_reason_prompt",
           mode: "coach",
-          message:
-            `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\n` +
-            `What’s the main reason it feels like a ${level} (and not higher)?`,
+          message: `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\nWhat’s the main reason it feels like a ${level} (and not higher)?`,
         });
         return;
       }
@@ -712,7 +752,7 @@ export default function Chat() {
 
         await callCoachBackend(
           `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. ` +
-            `Please reflect the change and suggest what to do next. If you propose tasks, include 2–3 learning links per task.`,
+            `Please reflect the change and suggest what to do next. If you propose tasks, include learning links per task.`,
           nextMessages
         );
         return;
