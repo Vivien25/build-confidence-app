@@ -1,9 +1,6 @@
 {
-<<<<<<< HEAD
-  "rewrites": [{ "source": "/(.*)", "destination": "/" }]
-}
-=======
-    "rewrites": [{ "source": "/(.*)", "destination": "/" }]
+    "rewrites": [
+      { "source": "/(.*)", "destination": "/" }
+    ]
   }
   
->>>>>>> adjust coach chat
