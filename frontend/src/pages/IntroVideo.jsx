@@ -2,7 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 
 // ✅ Use a PUBLIC, DIRECT .mp4 URL (Cloudinary / S3 / GCS / etc.)
-const VIDEO_URL = "https://YOUR_PUBLIC_VIDEO_URL_HERE.mp4";
+const VIDEO_URL = "https://res.cloudinary.com/dwi9flivx/video/upload/v1768800319/intro_female_xvsjq9.mp4";
 
 export default function IntroVideo() {
   const navigate = useNavigate();
