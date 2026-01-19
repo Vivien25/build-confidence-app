@@ -1,6 +1,8 @@
 import { useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
-import introVideo from "../assets/intro.mp4";
+
+// ✅ Use a PUBLIC, DIRECT .mp4 URL (Cloudinary / S3 / GCS / etc.)
+const VIDEO_URL = "https://YOUR_PUBLIC_VIDEO_URL_HERE.mp4";
 
 export default function IntroVideo() {
   const navigate = useNavigate();
@@ -22,7 +24,7 @@ export default function IntroVideo() {
     return () => video.removeEventListener("ended", handleEnded);
   }, []);
 
-  // Enable sound after user interaction
+  // Enable sound after user interaction (required by browsers)
   const enableSound = async () => {
     const video = videoRef.current;
     if (!video) return;
@@ -31,7 +33,7 @@ export default function IntroVideo() {
     setIsMuted(false);
 
     try {
-      await video.play(); // required for iOS
+      await video.play(); // required for iOS / Safari
     } catch (err) {
       console.log("Play blocked:", err);
     }
@@ -41,11 +43,12 @@ export default function IntroVideo() {
     <div style={styles.container}>
       <video
         ref={videoRef}
-        src={introVideo}
+        src={VIDEO_URL}
         autoPlay
         muted={isMuted}
         playsInline
         preload="auto"
+        controls={false}
         style={styles.video}
       />
 
@@ -76,7 +79,7 @@ const styles = {
     inset: 0,
     width: "100%",
     height: "100%",
-    objectFit: "contain",     
+    objectFit: "contain", // change to "cover" if you want full bleed
     objectPosition: "center",
   },
   soundBtn: {
