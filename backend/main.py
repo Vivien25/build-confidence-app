@@ -1,8 +1,9 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 from routers.chat import router as chat_router
 from routers.users import router as users_router
@@ -24,7 +25,15 @@ app.add_middleware(
 )
 
 # =========================
-# Health check (optional)
+# GLOBAL OPTIONS HANDLER
+# (Fixes 400 preflight issue)
+# =========================
+@app.options("/{path:path}")
+async def options_handler(request: Request, path: str):
+    return Response(status_code=200)
+
+# =========================
+# Health check
 # =========================
 @app.get("/")
 def health():
