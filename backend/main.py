@@ -1,14 +1,13 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
 
 from routers.chat import router as chat_router
 from routers.users import router as users_router
 
-app = FastAPI(title="Build Confidence API")
+app = FastAPI(title="Better Me API")
 
 # =========================
 # CORS (Frontend → Backend)
@@ -17,7 +16,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://build-confidence-app.vercel.app",
+        "https://build-better-me.vercel.app",
+        "https://build-confidence-app.vercel.app",  # optional old domain
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -25,19 +25,11 @@ app.add_middleware(
 )
 
 # =========================
-# GLOBAL OPTIONS HANDLER
-# (Fixes 400 preflight issue)
-# =========================
-@app.options("/{path:path}")
-async def options_handler(request: Request, path: str):
-    return Response(status_code=200)
-
-# =========================
 # Health check
 # =========================
 @app.get("/")
 def health():
-    return {"status": "ok", "service": "build-confidence-backend"}
+    return {"status": "ok", "service": "better-me-backend"}
 
 # =========================
 # Register routers
