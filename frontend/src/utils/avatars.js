@@ -1,5 +1,5 @@
-import miraImg from "../assets/coach_mira.png";
-import kaiImg from "../assets/coach_kai.png";
+import miraImg from "../assets/avatars/coach_mira.png";
+import kaiImg from "../assets/avatars/coach_kai.png";
 
 import userFem from "../assets/avatars/user_fem.png";
 import userMasc from "../assets/avatars/user_masc.png";
