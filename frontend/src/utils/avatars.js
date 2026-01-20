@@ -15,4 +15,3 @@ export const COACHES = {
   mira: { id: "mira", name: "Mira", avatar: miraImg },
   kai: { id: "kai", name: "Kai", avatar: kaiImg },
 };
-
