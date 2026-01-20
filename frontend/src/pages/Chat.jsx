@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import mermaid from "mermaid";
 import { getProfile } from "../utils/profile";
-import { avatarMap, coachAvatar } from "../utils/avatars";
+import { avatarMap, COACHES } from "../utils/avatars";
 import { useNavigate } from "react-router-dom";
 import ConversationPlansSidebar from "../components/ConversationPlansSidebar";
 
@@ -217,7 +217,14 @@ export default function Chat() {
 
   const userAvatarKey = profile?.avatar ?? "neutral";
   const userAvatar = avatarMap[userAvatarKey];
-  const coach = coachAvatar;
+  
+  // ✅ coach picked on Welcome page (defaults to mira)
+  const coachId = profile?.coachId || "mira";
+   const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || {
+    name: "Coach",
+    avatar: userAvatar?.img, // fallback (or a default image)
+   };
+   
 
   const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
@@ -909,7 +916,7 @@ export default function Chat() {
     <div style={styles.page}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <h2 style={{ margin: 0 }}>Build Confidence</h2>
+         <h2 style={{ margin: 0 }}>Better Me</h2>
           <div style={{ ...styles.muted, marginTop: 6 }}>
             Focus: <b>{focusLabel(focus)}</b> • Need: <b>{needLabel}</b>
           </div>
@@ -976,8 +983,8 @@ export default function Chat() {
 
             {messages.map((m, i) => {
               const isUser = m.role === "user";
-              const avatarImg = isUser ? userAvatar?.img : coach.img;
-              const name = isUser ? "You" : "Coach";
+              const avatarImg = isUser ? userAvatar?.img : coach.avatar;
+              const name = isUser ? "You" : coach.name;
 
               return (
                 <div key={m.id || i} style={{ display: "flex", alignItems: "flex-start", marginBottom: 12 }}>
@@ -1078,10 +1085,10 @@ export default function Chat() {
 
             {loading && (
               <div style={{ display: "flex", alignItems: "center", opacity: 0.85, marginTop: 8 }}>
-                <img src={coach.img} alt={coach.label} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
+                <img src={coach.avatar} alt={coach.name} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
                 <div>
-                  <div style={{ fontWeight: 700 }}>Coach</div>
-                  <div style={styles.muted}>typing…</div>
+                <div style={{ fontWeight: 700 }}>{coach.name}</div>
+                 <div style={styles.muted}>typing…</div>
                 </div>
               </div>
             )}

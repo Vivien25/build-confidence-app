@@ -1,13 +1,24 @@
 import { useNavigate } from "react-router-dom";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
+import { getProfile } from "../utils/profile";
 
-// ✅ Use a PUBLIC, DIRECT .mp4 URL (Cloudinary / S3 / GCS / etc.)
-const VIDEO_URL = "https://res.cloudinary.com/dwi9flivx/video/upload/v1768800319/intro_female_xvsjq9.mp4";
+// ✅ Put BOTH public mp4 URLs here
+const VIDEO_URLS = {
+  mira: "https://res.cloudinary.com/dwi9flivx/video/upload/v1768800319/intro_female_xvsjq9.mp4",
+  kai: "https://res.cloudinary.com/dwi9flivx/video/upload/v1768881071/male_avatar_with_script_xvhesy.mp4",
+};
 
 export default function IntroVideo() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
   const [isMuted, setIsMuted] = useState(true);
+
+  const profile = getProfile() || {};
+  const coachId = profile?.coachId || "mira";
+
+  const videoSrc = useMemo(() => {
+    return VIDEO_URLS[coachId] || VIDEO_URLS.mira;
+  }, [coachId]);
 
   const goNext = () => {
     navigate("/onboarding");
@@ -22,7 +33,22 @@ export default function IntroVideo() {
     video.addEventListener("ended", handleEnded);
 
     return () => video.removeEventListener("ended", handleEnded);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ✅ If coach changes (user goes back and picks another coach),
+  // reset mute + restart the video correctly
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    setIsMuted(true);
+    video.muted = true;
+
+    // force reload to ensure new src plays
+    video.load();
+    video.play().catch(() => {});
+  }, [videoSrc]);
 
   // Enable sound after user interaction (required by browsers)
   const enableSound = async () => {
@@ -43,7 +69,7 @@ export default function IntroVideo() {
     <div style={styles.container}>
       <video
         ref={videoRef}
-        src={VIDEO_URL}
+        src={videoSrc}
         autoPlay
         muted={isMuted}
         playsInline
