@@ -55,10 +55,11 @@ export default function Onboarding() {
         name: res.data.name,
         email: res.data.email,
         avatar,
-        coachAvatar: "coach_mira",
+        coachId: existing?.coachId || "mira", // ✅ IMPORTANT
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
+      
 
       navigate("/focus");
     } catch (err) {

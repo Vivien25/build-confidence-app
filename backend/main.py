@@ -12,6 +12,8 @@ app = FastAPI(title="Better Me API")
 # =========================
 # CORS (Frontend → Backend)
 # =========================
+# Add your production frontend domain(s) here.
+# IMPORTANT: Do NOT add a global OPTIONS route; CORSMiddleware handles preflight.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
