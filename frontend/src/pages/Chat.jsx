@@ -93,16 +93,6 @@ function userAskedForPlan(text) {
   return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule)\b/.test(t);
 }
 
-const NEED_OPTIONS = [
-  { key: "interview", label: "Interview confidence" },
-  { key: "presentation", label: "Presentation confidence" },
-  { key: "communication", label: "Communication confidence" },
-  { key: "networking", label: "Networking confidence" },
-  { key: "leadership", label: "Leadership confidence" },
-  { key: "negotiation", label: "Negotiation confidence" },
-  { key: "custom", label: "Other (custom)" },
-];
-
 // ---------- Mermaid component ----------
 function MermaidDiagram({ code }) {
   const ref = useRef(null);
@@ -167,7 +157,6 @@ function getAxiosErrorMessage(err) {
 function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
   if (focus === "work") return "work_focus";
 
-  // If your need keys are confidence-specific, keep them in "interview_confidence" bucket
   if (needKey === "interview") return "interview_confidence";
   if (needKey === "presentation") return "presentation_confidence";
   if (needKey === "communication") return "relationship_communication";
@@ -177,7 +166,6 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
 
   if (needKey === "custom") {
     const slug = slugify(customNeedLabel);
-    // keep custom in "general" but still pass something stable
     return slug ? `custom_${slug}` : "general";
   }
 
@@ -185,8 +173,8 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
 }
 
 /**
- * Convert backend plan -> UI plan object (your existing renderer expects plan.steps)
- * Backend plan: { id, title, goal, tasks:[{text,status}], ... }
+ * Convert backend plan -> UI plan object (your renderer expects plan.steps with resources)
+ * Backend plan: { id, title, goal, tasks:[{text,status,resources:[{title,url,type}]}], ... }
  */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : [];
@@ -200,7 +188,7 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
     steps: tasks.slice(0, 12).map((t, i) => ({
       id: `S${i + 1}`,
       label: String(t?.text || "").trim(),
-      resources: [], // backend currently not sending links; keep empty
+      resources: Array.isArray(t?.resources) ? t.resources : [],
     })),
     createdAt: plan?.created_at || new Date().toISOString(),
     acceptedAt: null,
@@ -232,6 +220,16 @@ export default function Chat() {
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
 
+  const NEED_OPTIONS = [
+    { key: "interview", label: "Interview confidence" },
+    { key: "presentation", label: "Presentation confidence" },
+    { key: "communication", label: "Communication confidence" },
+    { key: "networking", label: "Networking confidence" },
+    { key: "leadership", label: "Leadership confidence" },
+    { key: "negotiation", label: "Negotiation confidence" },
+    { key: "custom", label: "Other (custom)" },
+  ];
+
   const [needKey, setNeedKey] = useState(() => {
     const active = loadSaved(activeNeedStorage, null);
     if (active) return String(active);
@@ -256,18 +254,13 @@ export default function Chat() {
 
   // ✅ per-need chat storage
   const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
-
   // ✅ persistent across app
   const plansKey = `bc_plans_${userId}`;
-
-  // ✅ per focus “Plans from this conversation” (sessionStorage)
-  // NOTE: we will NOT clear it on mount anymore (so returning to /chat won’t feel like a refresh)
+  // ✅ per focus “Plans from this conversation” (sessionStorage) — do NOT clear
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
-
   // ✅ confidence state per focus + needKey (localStorage)
   const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
-
-  // ✅ Keep transient UI state across navigation (sessionStorage)
+  // ✅ UI state across navigation (sessionStorage)
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
@@ -279,21 +272,23 @@ export default function Chat() {
 
   // ✅ Prevent double-send
   const sendingRef = useRef(false);
+
   const [plans, setPlans] = useState([]);
   const [convPlans, setConvPlans] = useState([]);
 
   const [plansHydrated, setPlansHydrated] = useState(false);
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
 
-  // Confidence gating (your frontend flow; backend is now non-blocking, but you can keep this UX)
+  // (Optional) keep your confidence UX; backend will not force it
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
   const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() => loadSession(`${uiKey}_awaitBaselineReason`, false));
   const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() => loadSession(`${uiKey}_awaitDailyProgress`, false));
   const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() => loadSession(`${uiKey}_awaitDailyConfidence`, false));
 
-  // ✅ Keep sidebar UI state from backend (contract)
-  const [backendUI, setBackendUI] = useState(() => loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null }));
-  const [activePlanId, setActivePlanId] = useState(() => loadSession(`${uiKey}_activePlanId`, null));
+  // ✅ backend contract state (ui + plan)
+  const [backendUI, setBackendUI] = useState(() =>
+    loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null })
+  );
 
   const listRef = useRef(null);
   const reqSeqRef = useRef(0);
@@ -310,7 +305,7 @@ export default function Chat() {
     setPlansHydrated(true);
   }, [plansKey]);
 
-  // ✅ Load conversation plans from sessionStorage (do NOT clear on mount)
+  // Load conversation plans from sessionStorage (do NOT clear on mount)
   useEffect(() => {
     const savedConv = loadSession(convPlansKey, []);
     setConvPlans(Array.isArray(savedConv) ? savedConv : []);
@@ -323,13 +318,13 @@ export default function Chat() {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, chatKey]);
 
-  // Persist global plans ONLY after hydration
+  // Persist global plans after hydration
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
   }, [plansKey, plans, plansHydrated]);
 
-  // Persist conversation plans (sessionStorage) ONLY after hydration
+  // Persist conversation plans after hydration
   useEffect(() => {
     if (!convPlansHydrated) return;
     saveSession(convPlansKey, convPlans);
@@ -353,9 +348,8 @@ export default function Chat() {
   useEffect(() => saveSession(`${uiKey}_awaitDailyProgress`, awaitingDailyProgress), [uiKey, awaitingDailyProgress]);
   useEffect(() => saveSession(`${uiKey}_awaitDailyConfidence`, awaitingDailyConfidence), [uiKey, awaitingDailyConfidence]);
   useEffect(() => saveSession(`${uiKey}_backendUI`, backendUI), [uiKey, backendUI]);
-  useEffect(() => saveSession(`${uiKey}_activePlanId`, activePlanId), [uiKey, activePlanId]);
 
-  // Reset gating when need changes + remove stale system prompts
+  // Reset local UX gating when need changes (don’t clear stored chat)
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
@@ -363,7 +357,6 @@ export default function Chat() {
     setAwaitingDailyConfidence(false);
     setReadyForBaseline(false);
 
-    // Keep messages (per-need) but remove stale system prompts
     setMessages((prev) =>
       prev.filter(
         (m) =>
@@ -377,13 +370,11 @@ export default function Chat() {
       )
     );
 
-    // reset backend UI for this need
     setBackendUI({ mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null });
-    setActivePlanId(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
-  // Baseline trigger + daily check-in trigger (per need)
+  // Baseline trigger + daily check-in trigger (your UX; backend is non-blocking)
   useEffect(() => {
     if (!hasUserSpoken || !readyForBaseline) return;
 
@@ -443,9 +434,7 @@ export default function Chat() {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
 
     const activeNeedKey =
-      accepted?.needKey === "custom"
-        ? `custom_${slugify(accepted?.needLabel) || "custom"}`
-        : accepted?.needKey || needKey;
+      accepted?.needKey === "custom" ? `custom_${slugify(accepted?.needLabel) || "custom"}` : accepted?.needKey || needKey;
 
     save(activeNeedStorage, activeNeedKey);
 
@@ -474,12 +463,14 @@ export default function Chat() {
         role: "assistant",
         type: "text",
         mode: "coach",
-        message: `Saved ✅ Added to this conversation and your All Plans page.`,
+        message: "Saved ✅ Added to this conversation and your All Plans page.",
       },
     ]);
   };
 
-  const revisePlan = () => {
+  const revisePlan = async () => {
+    // New backend behavior: refinement happens only if user asks to refine.
+    // We’ll prompt user to type a refine request, then send it normally.
     setMessages((prev) => [
       ...prev,
       {
@@ -487,15 +478,14 @@ export default function Chat() {
         role: "assistant",
         type: "text",
         mode: "coach",
-        message: "Sure — tell me what to change. (Examples: shorter, easier, focus on system design, 3-day sprint.)",
+        message:
+          "Sure — tell me what to change. (Examples: “make it shorter”, “focus on system design”, “replace step 3”, “more lightweight”.)",
       },
     ]);
   };
 
-  // ✅ UPDATED: call backend using NEW contract
   async function callCoachBackend(outboundText) {
     const mySeq = ++reqSeqRef.current;
-
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
 
     try {
@@ -515,46 +505,40 @@ export default function Chat() {
 
       const data = res.data || {};
 
-      // NEW: ui + effects + messages[] + optional plan
       const ui = data.ui || {};
-      setBackendUI({
+      const uiState = {
         mode: ui.mode || "CHAT",
         show_plan_sidebar: !!ui.show_plan_sidebar,
         plan_link: ui.plan_link || null,
         mermaid: ui.mermaid || null,
-      });
-
-      const effects = data.effects || {};
-      const createdId = effects.created_plan_id || null;
-      const updatedId = effects.updated_plan_id || null;
-      if (createdId) setActivePlanId(createdId);
-      if (updatedId) setActivePlanId(updatedId);
+      };
+      setBackendUI(uiState);
 
       const backendMessages = Array.isArray(data.messages) ? data.messages : [];
-      backendMessages.forEach((m) => {
-        const text = String(m?.text || "").trim();
-        if (!text) return;
+      if (backendMessages.length > 0) {
         setMessages((prev) => [
           ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "text",
-            mode: "coach",
-            message: text,
-          },
+          ...backendMessages
+            .map((m) => String(m?.text || "").trim())
+            .filter(Boolean)
+            .map((text) => ({
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: text,
+            })),
         ]);
-      });
+      }
 
-      // If backend returned a plan object, render it as a plan card + accept controls
+      // Render plan card only when backend returns plan (create/refine/show)
       if (data.plan && typeof data.plan === "object") {
         const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
 
         const mermaidCode =
-          ui.mermaid && String(ui.mermaid).trim()
-            ? String(ui.mermaid)
-            : // fallback: simple flowchart from steps
-              (() => {
+          uiState.mermaid && String(uiState.mermaid).trim()
+            ? String(uiState.mermaid)
+            : (() => {
                 const safe = (t) => String(t || "").replace(/"/g, '\\"');
                 const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
                 const first = steps?.[0]?.id || "S1";
@@ -593,7 +577,6 @@ ${edges}
       }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
-
       const msg = getAxiosErrorMessage(err);
       setMessages((prev) => [
         ...prev,
@@ -611,11 +594,8 @@ ${edges}
     }
   }
 
-  // ✅ NEW: sync baseline to backend (NEW contract)
   async function syncBaselineToBackend(level) {
-    const mySeq = ++reqSeqRef.current;
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
-
     try {
       await axios.post(
         `${API_BASE}/chat`,
@@ -630,9 +610,6 @@ ${edges}
       );
     } catch {
       // ignore
-    } finally {
-      // don’t let this advance seq for the “real” message
-      reqSeqRef.current = Math.max(reqSeqRef.current, mySeq);
     }
   }
 
@@ -721,8 +698,7 @@ ${edges}
     if (!isGreeting(userText)) setHasUserSpoken(true);
     if (!readyForBaseline && userAskedForPlan(userText)) setReadyForBaseline(true);
 
-    const userMsgObj = { id: uid("msg"), role: "user", text: userText, type: "text" };
-    setMessages((prev) => [...prev, userMsgObj]);
+    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text" }]);
 
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
@@ -784,7 +760,6 @@ ${edges}
         return;
       }
 
-      // Normal message → backend (NEW contract)
       await callCoachBackend(`[Need: ${nLabel}] ${userText}`);
     } finally {
       setLoading(false);

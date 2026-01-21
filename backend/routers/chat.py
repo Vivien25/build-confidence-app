@@ -2,7 +2,6 @@
 import os
 import json
 import re
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,11 +73,8 @@ class ChatRequest(BaseModel):
     user_id: str = Field(..., description="Stable id (email, uuid, etc.)")
     message: str = Field(..., description="User message text")
 
-    # Optional context from frontend (safe to ignore if you don't send them)
     coach: Optional[str] = None
     profile: Optional[Dict[str, Any]] = None
-
-    # Optional: frontend can pass a topic to avoid guessing
     topic: Optional[str] = None
 
 
@@ -113,31 +109,24 @@ class ChatResponse(BaseModel):
 DEFAULT_STATE = {
     "mode": "CHAT",  # CHAT | PLAN_BUILD | CHECKIN (future)
     "history": [],  # list[{role,text,ts}]
-    "metrics": {
-        "confidence": {
-            # topic_key -> {baseline,last,updated_at}
-        }
-    },
+    "metrics": {"confidence": {}},  # topic_key -> {baseline,last,updated_at}
     "plan_build": {
         "step": "DISCOVERY",  # DISCOVERY | DRAFT | REFINE
-        "topic": None,  # topic_key
+        "topic": None,
         "discovery_questions_asked": 0,
-        "discovery_answers": {},  # freeform dict
+        "discovery_answers": {},
         "active_plan_id": None,
-        "locked": False,  # plan stability guarantee
+        "locked": False,
     },
-    "plans": {
-        # plan_id -> plan object
-    },
+    "plans": {},  # plan_id -> plan object
 }
 
 
 def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
-    # Shallow merge defaults; keep existing nested content if present.
     merged = json.loads(json.dumps(DEFAULT_STATE))
     for k, v in state.items():
         merged[k] = v
-    # Ensure nested keys
+
     merged.setdefault("history", [])
     merged.setdefault("metrics", {"confidence": {}})
     merged["metrics"].setdefault("confidence", {})
@@ -185,6 +174,7 @@ _REFINE_PATTERNS = [
     r"\badd\b",
     r"\bremove\b",
     r"\bchange\b",
+    r"\brevise\b",
 ]
 
 _SKIP_PATTERNS = [
@@ -193,6 +183,13 @@ _SKIP_PATTERNS = [
     r"\bno plan\b",
     r"\bstop\b",
     r"\bnot now\b",
+]
+
+_SHOW_PLAN_PATTERNS = [
+    r"\bshow (me )?the plan\b",
+    r"\bsee the plan\b",
+    r"\bview the plan\b",
+    r"\bopen the plan\b",
 ]
 
 
@@ -217,36 +214,31 @@ def skip_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SKIP_PATTERNS)
 
 
+def show_plan_requested(user_text: str) -> bool:
+    return _matches_any(user_text, _SHOW_PLAN_PATTERNS)
+
+
 def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     if not topic:
         return None
     t = topic.strip().lower()
-    # Allow frontend to pass an exact key like "interview_confidence"
     t = re.sub(r"[^a-z0-9_]+", "_", t)
     t = re.sub(r"_+", "_", t).strip("_")
     return t or None
 
 
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
-    """
-    Light heuristic topic detection. You can expand this over time.
-    """
     t = (user_text or "").lower()
 
-    # Strong signals
     if any(k in t for k in ["interview", "behavioral", "system design", "leetcode", "ml ops", "mle", "data engineer"]):
         return "interview_confidence"
-
     if any(k in t for k in ["work", "job", "boss", "coworker", "deadline", "productivity", "focus"]):
         return "work_focus"
-
     if any(k in t for k in ["relationship", "partner", "husband", "wife", "dating", "communication"]):
         return "relationship_communication"
-
     if any(k in t for k in ["appearance", "body image", "looks", "weight", "skin", "hair"]):
         return "appearance_confidence"
 
-    # Profile fallback (if you store focus there)
     if profile and isinstance(profile, dict):
         focus = str(profile.get("focus") or "").lower()
         if focus:
@@ -255,38 +247,38 @@ def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) ->
     return "general"
 
 
+# ---------------------------
+# Deterministic mode router (NO STICKY PLAN_BUILD)
+# ---------------------------
+DISCOVERY_QUESTIONS = [
+    "When is the deadline (or when do you want to feel ready)? If you’re not sure, just say “soon.”",
+    "What’s the main target: ML Ops / Data Engineering / both? (One word is fine.)",
+]
+
+
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
-    """
-    Deterministic router:
-    - Default CHAT.
-    - PLAN_BUILD when user requests plan or refinement.
-    - If user says skip, go CHAT.
-    """
     if skip_requested(user_text):
         return "CHAT", None
 
     pb = state["plan_build"]
     has_active_plan = bool(pb.get("active_plan_id")) and pb.get("topic") == topic_key
 
-    # Explicit new plan overrides lock.
     if explicit_new_plan_request(user_text):
         return "PLAN_BUILD", "DRAFT"
 
-    # If they ask to refine and we have a plan, go refine.
     if refine_requested(user_text) and has_active_plan:
         return "PLAN_BUILD", "REFINE"
 
-    # If they ask for a plan (or likely want one)
     if plan_requested(user_text):
-        # If plan exists for this topic and no explicit new plan request -> refine
         if has_active_plan:
-            return "PLAN_BUILD", "REFINE"
+            # Asking about plan != editing plan
+            return "CHAT", None
         return "PLAN_BUILD", "DISCOVERY"
 
-    # Otherwise stay in current mode unless plan_build is mid-flight
+    # Continue PLAN_BUILD only if discovery is still in progress
     if state.get("mode") == "PLAN_BUILD":
-        # Continue plan build flow, but enforce lock behavior later
-        return "PLAN_BUILD", pb.get("step") or "DISCOVERY"
+        if pb.get("step") == "DISCOVERY" and (pb.get("discovery_questions_asked") or 0) < len(DISCOVERY_QUESTIONS):
+            return "PLAN_BUILD", "DISCOVERY"
 
     return "CHAT", None
 
@@ -309,28 +301,138 @@ def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str
 
 
 # ---------------------------
+# Learning resources (curated catalog + keyword router)
+# ---------------------------
+RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
+    "mlops": [
+        {
+            "title": "Google Cloud: MLOps (CD/CT pipelines) overview",
+            "url": "https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning",
+            "type": "doc",
+        },
+        {
+            "title": "Vertex AI: MLOps & pipelines (overview)",
+            "url": "https://cloud.google.com/vertex-ai/docs/pipelines/introduction",
+            "type": "doc",
+        },
+        {
+            "title": "MLflow Tracking (official docs)",
+            "url": "https://mlflow.org/docs/latest/tracking.html",
+            "type": "doc",
+        },
+        {
+            "title": "Model monitoring concepts (Vertex AI)",
+            "url": "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview",
+            "type": "doc",
+        },
+    ],
+    "system_design": [
+        {
+            "title": "Google Cloud Architecture Center",
+            "url": "https://cloud.google.com/architecture",
+            "type": "doc",
+        },
+        {
+            "title": "Google SRE Workbook (reliability patterns)",
+            "url": "https://sre.google/workbook/table-of-contents/",
+            "type": "book",
+        },
+    ],
+    "data_engineering": [
+        {
+            "title": "BigQuery documentation",
+            "url": "https://cloud.google.com/bigquery/docs",
+            "type": "doc",
+        },
+        {
+            "title": "BigQuery best practices",
+            "url": "https://cloud.google.com/bigquery/docs/best-practices-performance-overview",
+            "type": "doc",
+        },
+        {
+            "title": "Cloud Storage documentation",
+            "url": "https://cloud.google.com/storage/docs",
+            "type": "doc",
+        },
+    ],
+    "kubernetes": [
+        {
+            "title": "Kubernetes Basics",
+            "url": "https://kubernetes.io/docs/tutorials/kubernetes-basics/",
+            "type": "doc",
+        },
+        {
+            "title": "Kubernetes Deployments",
+            "url": "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/",
+            "type": "doc",
+        },
+    ],
+    "interview": [
+        {
+            "title": "STAR interview method (overview)",
+            "url": "https://en.wikipedia.org/wiki/Situation,_task,_action,_result",
+            "type": "article",
+        },
+        {
+            "title": "System design primer (GitHub)",
+            "url": "https://github.com/donnemartin/system-design-primer",
+            "type": "repo",
+        },
+    ],
+}
+
+
+def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
+    """
+    Stable, real links. No hallucinated URLs.
+    Picks a few resources based on keywords and topic.
+    """
+    t = (task_text or "").lower()
+    picks: List[Dict[str, str]] = []
+
+    # Keyword routing
+    if any(k in t for k in ["mlops", "pipeline", "deployment", "serving", "monitor", "drift", "registry", "version"]):
+        picks += RESOURCE_CATALOG["mlops"]
+    if any(k in t for k in ["bigquery", "sql", "etl", "elt", "warehouse", "dataflow", "spark", "composer", "airflow", "gcs", "storage"]):
+        picks += RESOURCE_CATALOG["data_engineering"]
+    if any(k in t for k in ["system design", "architecture", "trade-off", "latency", "throughput", "reliability", "scalability"]):
+        picks += RESOURCE_CATALOG["system_design"]
+    if any(k in t for k in ["k8s", "kubernetes", "helm", "pod", "deployment", "service mesh"]):
+        picks += RESOURCE_CATALOG["kubernetes"]
+    if any(k in t for k in ["behavioral", "star", "mock interview", "interview", "tell me about yourself"]):
+        picks += RESOURCE_CATALOG["interview"]
+
+    # Topic fallback
+    if not picks and topic_key == "interview_confidence":
+        picks += RESOURCE_CATALOG["interview"] + RESOURCE_CATALOG["system_design"] + RESOURCE_CATALOG["mlops"]
+
+    # Dedupe + cap
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for r in picks:
+        url = r.get("url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(r)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+# ---------------------------
 # Gemini helpers
 # ---------------------------
 def gemini_text(system: str, user: str) -> str:
-    """
-    Minimal, reliable text generation (no JSON schema).
-    """
     try:
         resp = client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[
-                types.Content(role="user", parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]),
-            ],
-            config=types.GenerateContentConfig(
-                temperature=0.7,
-                max_output_tokens=700,
-            ),
+            contents=[types.Content(role="user", parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")])],
+            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
         )
-        # SDK returns candidates; .text is usually present
         text = getattr(resp, "text", None)
         if text:
             return text.strip()
-        # Fallback: try candidates
         if getattr(resp, "candidates", None):
             parts = resp.candidates[0].content.parts
             return "".join([p.text for p in parts if getattr(p, "text", None)]).strip()
@@ -341,13 +443,12 @@ def gemini_text(system: str, user: str) -> str:
 
 def extract_bullets(text: str, max_items: int = 10) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
-    bullets = []
+    bullets: List[str] = []
     for ln in lines:
         ln = re.sub(r"^\s*[-*•]\s+", "", ln).strip()
         ln = re.sub(r"^\s*\d+\.\s+", "", ln).strip()
         if not ln:
             continue
-        # Avoid super long lines
         if len(ln) > 160:
             ln = ln[:157].rstrip() + "…"
         bullets.append(ln)
@@ -360,10 +461,6 @@ def extract_bullets(text: str, max_items: int = 10) -> List[str]:
 # Confidence: non-blocking metadata
 # ---------------------------
 def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
-    """
-    If user sends a single number 1-10 (or '5/10'), capture as confidence.
-    This MUST NOT affect planning transitions.
-    """
     t = (user_text or "").strip().lower()
     m = re.fullmatch(r"(\d{1,2})(?:\s*/\s*10)?", t)
     if not m:
@@ -383,23 +480,12 @@ def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: s
 # ---------------------------
 # Plan building primitives
 # ---------------------------
-DISCOVERY_QUESTIONS = [
-    "When is the deadline (or when do you want to feel ready)? If you’re not sure, just say “soon.”",
-    "What’s the main target: ML Ops / Data Engineering / both? (One word is fine.)",
-]
-
-
 def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_text: str) -> Dict[str, Any]:
-    """
-    Create a plan deterministically, using Gemini only to suggest tasks.
-    Always returns a full plan object.
-    """
-    # Create a short prompt for task ideas
     deadline = discovery_answers.get("deadline") or "soon"
     target = discovery_answers.get("target") or "mixed"
 
     system = (
-        "You are a practical, concise coach. Suggest a simple interview prep plan. "
+        "You are a practical, concise coach. Suggest a simple plan. "
         "Return ONLY a bullet list of actionable tasks (no headings, no paragraphs). "
         "Tasks should be specific and doable in 30–90 minutes."
     )
@@ -411,11 +497,10 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
         "Give 8–10 tasks."
     )
     ideas = gemini_text(system, user)
-    tasks = extract_bullets(ideas, max_items=10)
+    task_texts = extract_bullets(ideas, max_items=10)
 
-    if not tasks:
-        # Hard fallback (never return empty)
-        tasks = [
+    if not task_texts:
+        task_texts = [
             "Write a 6–8 line story: your background + what role you want + why.",
             "Review core concepts and make a 1-page cheat sheet.",
             "Do one mock interview question and write a better second answer.",
@@ -436,6 +521,16 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
     }
     title = title_map.get(topic_key, "Personal Plan")
 
+    tasks = []
+    for t in task_texts:
+        tasks.append(
+            {
+                "text": t,
+                "status": "todo",
+                "resources": pick_resources(topic_key, t, max_items=3),
+            }
+        )
+
     plan = {
         "id": plan_id,
         "topic": topic_key,
@@ -446,7 +541,7 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
             {"name": "Build reps", "status": "todo"},
             {"name": "Polish & confidence", "status": "todo"},
         ],
-        "tasks": [{"text": t, "status": "todo"} for t in tasks],
+        "tasks": tasks,
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
@@ -454,14 +549,10 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
 
 
 def plan_to_mermaid(plan: Dict[str, Any]) -> str:
-    """
-    Optional: Mermaid diagram for sidebar. Keep it small and safe.
-    """
     title = (plan.get("title") or "Plan").replace('"', "'")
     tasks = plan.get("tasks") or []
-    # Limit nodes to avoid huge charts
     nodes = tasks[:6]
-    lines = [f'flowchart TD', f'A["{title}"]']
+    lines = ["flowchart TD", f'A["{title}"]']
     for i, t in enumerate(nodes, start=1):
         txt = (t.get("text") or "").replace('"', "'")
         node_id = f"T{i}"
@@ -474,27 +565,52 @@ def plan_to_mermaid(plan: Dict[str, Any]) -> str:
 # Mode handlers
 # ---------------------------
 def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool) -> ChatResponse:
-    # Friendly chat response; keep it short.
+    pb = state["plan_build"]
+    plan_id = pb.get("active_plan_id") if pb.get("topic") == topic_key else None
+    has_plan = bool(plan_id) and plan_id in state["plans"]
+
+    if show_plan_requested(user_text) and has_plan:
+        plan = state["plans"][plan_id]
+        state["mode"] = "CHAT"
+        return ChatResponse(
+            messages=[CoachMessage(text="Here’s your current plan. Want to work on step 1, or revise anything?")],
+            ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
+            effects=Effects(saved_confidence=saved_conf),
+            plan=plan,
+        )
+
     system = (
         "You are a friendly, helpful coach. Keep responses short and natural. "
         "Do NOT create a plan unless user asks for one. "
-        "If user seems stressed, offer help in one sentence."
+        "If user is choosing a specific step from an existing plan, help them execute it with 3–6 concrete substeps. "
+        "Avoid repeating the plan."
     )
-    if saved_conf:
-        # Acknowledge without gating.
+
+    if has_plan:
+        plan = state["plans"][plan_id]
+        top_tasks = "\n".join([f"- {t['text']}" for t in (plan.get("tasks") or [])[:8]])
         user = (
-            f"The user just provided a confidence number for topic '{topic_key}'. "
-            f"User message: {user_text}\n"
-            "Reply briefly. Do not ask more calibration questions."
+            f"Topic: {topic_key}\n"
+            f"Existing plan tasks:\n{top_tasks}\n\n"
+            f"User message:\n{user_text}\n\n"
+            "If the user picked a task, give a tiny checklist to start now (no new plan). "
+            "Otherwise reply normally."
         )
     else:
-        user = user_text
+        if saved_conf:
+            user = (
+                f"The user just provided a confidence number for topic '{topic_key}'. "
+                f"User message: {user_text}\n"
+                "Reply briefly. Do not ask more calibration questions."
+            )
+        else:
+            user = user_text
 
     text = gemini_text(system, user)
 
     return ChatResponse(
         messages=[CoachMessage(text=text)],
-        ui=UIState(mode="CHAT", show_plan_sidebar=bool(state["plan_build"].get("active_plan_id"))),
+        ui=UIState(mode="CHAT", show_plan_sidebar=has_plan, plan_link=(f"/plans/{plan_id}" if has_plan else None)),
         effects=Effects(saved_confidence=saved_conf),
         plan=None,
     )
@@ -505,18 +621,14 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
     pb["topic"] = topic_key
     pb["step"] = "DISCOVERY"
 
-    # Record answer if we previously asked a question
-    # We map answers by question index.
     q_asked = int(pb.get("discovery_questions_asked") or 0)
     if q_asked > 0:
-        # Store last answer using the previous question slot
         idx = q_asked - 1
         if idx == 0:
             pb["discovery_answers"]["deadline"] = user_text.strip()
         elif idx == 1:
             pb["discovery_answers"]["target"] = user_text.strip()
 
-    # Enforce max 2 questions then draft.
     if q_asked >= len(DISCOVERY_QUESTIONS):
         pb["step"] = "DRAFT"
         return handle_plan_draft(state, user_text, topic_key)
@@ -524,6 +636,7 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
     question = DISCOVERY_QUESTIONS[q_asked]
     pb["discovery_questions_asked"] = q_asked + 1
 
+    state["mode"] = "PLAN_BUILD"
     return ChatResponse(
         messages=[CoachMessage(text=question)],
         ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True),
@@ -537,31 +650,44 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
     pb["topic"] = topic_key
     pb["step"] = "DRAFT"
 
-    # Plan stability guarantee
     if not should_create_new_plan(state, user_text, topic_key):
         pb["locked"] = True
-        pb["step"] = "REFINE"
-        return handle_plan_refine(state, user_text, topic_key)
+        state["mode"] = "CHAT"
+        active_id = pb.get("active_plan_id")
+        plan = state["plans"].get(active_id) if active_id else None
+        return ChatResponse(
+            messages=[CoachMessage(text="You already have a plan for this topic. Want to work on step 1 or revise anything?")],
+            ui=UIState(
+                mode="CHAT",
+                show_plan_sidebar=True,
+                plan_link=(f"/plans/{active_id}" if active_id else None),
+                mermaid=(plan_to_mermaid(plan) if plan else None),
+            ),
+            effects=Effects(),
+            plan=None,
+        )
 
     plan = build_plan_object(topic_key, pb.get("discovery_answers") or {}, user_text)
 
-    # Save plan
     state["plans"][plan["id"]] = plan
     pb["active_plan_id"] = plan["id"]
     pb["locked"] = True
     pb["step"] = "REFINE"
 
     mermaid = plan_to_mermaid(plan)
-    plan_link = f"/plans/{plan['id']}"  # frontend can interpret this route however you want
+    plan_link = f"/plans/{plan['id']}"
 
     coach_text = (
         f"Awesome — I made a starter plan for **{plan['title']}**.\n"
-        f"Want it more intense or more lightweight?"
+        "I also attached learning resources under each step so you can implement right away.\n"
+        "Want it more intense or more lightweight?"
     )
+
+    state["mode"] = "CHAT"
 
     return ChatResponse(
         messages=[CoachMessage(text=coach_text)],
-        ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid),
+        ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid),
         effects=Effects(created_plan_id=plan["id"]),
         plan=plan,
     )
@@ -574,23 +700,28 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
 
     plan_id = pb.get("active_plan_id")
     if not plan_id or plan_id not in state["plans"]:
-        # If missing, fall back to draft
         pb["step"] = "DRAFT"
         pb["locked"] = False
         return handle_plan_draft(state, user_text, topic_key)
 
     plan = state["plans"][plan_id]
 
-    # If user explicitly asks for a new plan, draft a replacement.
     if explicit_new_plan_request(user_text):
         pb["locked"] = False
         pb["step"] = "DRAFT"
-        # Reset discovery for clean new plan (optional)
         pb["discovery_questions_asked"] = 0
         pb["discovery_answers"] = {}
         return handle_plan_draft(state, user_text, topic_key)
 
-    # Otherwise, we refine in-place.
+    if not refine_requested(user_text):
+        state["mode"] = "CHAT"
+        return ChatResponse(
+            messages=[CoachMessage(text="Got it. Which step do you want to tackle today?")],
+            ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
+            effects=Effects(),
+            plan=None,
+        )
+
     system = (
         "You are editing an existing plan. Do NOT create a new plan. "
         "Given the user's request, propose up to 5 concrete edits to tasks. "
@@ -600,22 +731,20 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
     user = (
         f"Plan title: {plan.get('title')}\n"
         f"Existing tasks:\n"
-        + "\n".join([f"- {t['text']}" for t in (plan.get("tasks") or [])][:12])
+        + "\n".join([f"- {t['text']}" for t in (plan.get('tasks') or [])][:12])
         + "\n\nUser request:\n"
         + user_text
     )
     edits_raw = gemini_text(system, user)
     edits = extract_bullets(edits_raw, max_items=5)
 
-    # Apply edits lightly/deterministically:
     tasks = plan.get("tasks") or []
 
     def add_task(text: str):
         if text and len(tasks) < 30:
-            tasks.append({"text": text, "status": "todo"})
+            tasks.append({"text": text, "status": "todo", "resources": pick_resources(topic_key, text)})
 
     def remove_match(text: str):
-        # Remove first task that roughly matches
         key = text.lower().strip()
         for i, t in enumerate(tasks):
             if key and key in t.get("text", "").lower():
@@ -623,7 +752,6 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
                 return
 
     def change_match(old_new: str):
-        # naive "CHANGE: old -> new" parsing
         m = re.split(r"\s*->\s*", old_new, maxsplit=1)
         if len(m) != 2:
             return
@@ -633,10 +761,10 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
         for t in tasks:
             if old.lower() in t.get("text", "").lower():
                 t["text"] = new
+                t["resources"] = pick_resources(topic_key, new)
                 return
 
     def reorder_hint(_text: str):
-        # We keep reorder simple: move first matching to top
         key = _text.lower().strip()
         for i, t in enumerate(tasks):
             if key and key in t.get("text", "").lower():
@@ -664,12 +792,14 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
 
     coach_text = (
         "Done — I updated your current plan (same plan, not a new one).\n"
-        "What do you want to tackle *today*?"
+        "Resources are attached under steps. What do you want to tackle *today*?"
     )
+
+    state["mode"] = "CHAT"
 
     return ChatResponse(
         messages=[CoachMessage(text=coach_text)],
-        ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid),
+        ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid),
         effects=Effects(updated_plan_id=plan_id),
         plan=plan,
     )
@@ -688,32 +818,23 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not user_text:
         raise HTTPException(status_code=400, detail="Empty message")
 
-    # Append history
+    # Fast warm-up ping: no Gemini, no state churn
+    if user_text.lower() == "ping":
+        return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
+
+    # Append user message to history
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
-    state["history"] = state["history"][-80:]  # cap
+    state["history"] = state["history"][-80:]
 
-    # Topic
     topic_key = normalize_topic_key(req.topic) or infer_topic_key(user_text, req.profile)
-
-    # Non-blocking confidence capture
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
-    # Decide mode/step deterministically
     mode, step = decide_mode_and_step(state, user_text, topic_key)
     state["mode"] = mode
 
-    # Enforce plan stability lock: if plan exists for topic and no explicit new plan -> REFINE
-    pb = state["plan_build"]
-    has_active_plan_same_topic = bool(pb.get("active_plan_id")) and pb.get("topic") == topic_key
-    if mode == "PLAN_BUILD" and has_active_plan_same_topic and not explicit_new_plan_request(user_text):
-        pb["locked"] = True
-        step = "REFINE"
-
-    # Route to handlers
     if mode == "CHAT":
         resp = handle_chat(state, user_text, topic_key, saved_conf)
     elif mode == "PLAN_BUILD":
-        # If no plan exists, we do DISCOVERY (max 2 Qs), then DRAFT.
         if step == "DISCOVERY":
             resp = handle_plan_discovery(state, user_text, topic_key)
         elif step == "DRAFT":
@@ -721,16 +842,13 @@ def chat(req: ChatRequest) -> ChatResponse:
         else:
             resp = handle_plan_refine(state, user_text, topic_key)
     else:
-        # CHECKIN reserved for later; fallback to CHAT now.
         state["mode"] = "CHAT"
         resp = handle_chat(state, user_text, topic_key, saved_conf)
 
-    # Append coach message to history
     if resp.messages:
         state["history"].append({"role": "coach", "text": resp.messages[0].text, "ts": _now_iso()})
         state["history"] = state["history"][-80:]
 
-    # Persist state
     bucket.clear()
     bucket.update(state)
     _save_all_state(all_state)
