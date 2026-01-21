@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import traceback
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -93,9 +94,7 @@ def _today_iso_date() -> str:
 
 # ---------------------------
 # Plan store (per focus+need)
-# Backward-compatible:
-# - if st["current_plan"] is a list -> legacy single plan
-# - if dict -> keyed by plan_key
+# Backward-compatible
 # ---------------------------
 def get_current_plan(st: Dict[str, Any], plan_key: str) -> List[Any]:
     cp = st.get("current_plan", [])
@@ -135,30 +134,19 @@ def set_current_plan(user_id: str, plan_key: str, plan: List[Any]) -> None:
 # Confidence parsing (backend)
 # ---------------------------
 def _parse_confidence_from_message(msg: str) -> Optional[float]:
-    """
-    Accept:
-      - "6"
-      - "6/10"
-      - "confidence is 6"
-      - "my confidence level is 6/10"
-    Return 1..10 float, else None.
-    """
     if not msg:
         return None
     m = msg.strip()
 
-    # pure number
     if re.fullmatch(r"(10|[1-9])(\.\d+)?", m):
         v = float(m)
         return v if 1 <= v <= 10 else None
 
-    # contains "/10"
     m2 = re.search(r"\b(10|[1-9])(\.\d+)?\s*/\s*10\b", m.lower())
     if m2:
         v = float(m2.group(1) + (m2.group(2) or ""))
         return v if 1 <= v <= 10 else None
 
-    # contains "confidence" and a 1..10 number
     if "confidence" in m.lower():
         m3 = re.search(r"\b(10|[1-9])(\.\d+)?\b", m)
         if m3:
@@ -170,7 +158,6 @@ def _parse_confidence_from_message(msg: str) -> Optional[float]:
 
 # ---------------------------
 # Confidence state (per focus+need)
-# Stored under st["confidence"][conf_key]
 # ---------------------------
 def _get_conf_bucket(st: Dict[str, Any], key: str) -> Dict[str, Any]:
     conf = st.get("confidence", {})
@@ -246,8 +233,6 @@ NO_PLAN_PATTERNS = [
     r"\bdo not give (me )?a plan\b",
 ]
 
-# ✅ IMPORTANT: "yes/ok/sure" are NOT plan requests.
-# Only plan-specific phrases go here.
 YES_PLAN_PATTERNS = [
     r"\bgive me (a )?plan\b",
     r"\bmake (me )?a plan\b",
@@ -259,7 +244,6 @@ YES_PLAN_PATTERNS = [
     r"\bsteps\b",
 ]
 
-# ✅ Generic affirmation (only meaningful when pending_offer=True)
 AFFIRM_PATTERNS = [
     r"\byes\b",
     r"\byeah\b",
@@ -351,10 +335,6 @@ def looks_like_progress(msg: str) -> bool:
 
 
 def _looks_like_user_wants_support(msg: str) -> bool:
-    """
-    Heuristic: user sharing a situation/problem/feeling where offering a plan could help,
-    but they did NOT ask for a plan yet.
-    """
     t = (msg or "").lower()
     if not t:
         return False
@@ -477,7 +457,6 @@ def chat(payload: ChatIn):
     need_key = (payload.need_key or "interview").strip().lower()
     need_label = (payload.need_label or "").strip() or need_key.replace("_", " ").title()
 
-    # ✅ per-focus + per-need keys
     plan_key = f"{focus}::{need_key}"
     conf_key = plan_key
 
@@ -488,19 +467,15 @@ def chat(payload: ChatIn):
 
     conf_bucket = _get_conf_bucket(st, conf_key)
 
-    # baseline state for THIS need
     awaiting_baseline_reason = bool(conf_bucket.get("awaiting_baseline_reason", False))
     baseline = conf_bucket.get("baseline", None)
 
-    # gating flags (per need)
     pending_offer = bool(conf_bucket.get("pending_plan_offer", False))
     pending_plan_conf = bool(conf_bucket.get("pending_plan_confidence", False))
-    pending_progress_conf = bool(conf_bucket.get("pending_progress_confidence", False))  # ✅ NEW
+    pending_progress_conf = bool(conf_bucket.get("pending_progress_confidence", False))
     today = _today_iso_date()
 
-    # ------------------------------------
-    # Hard rule: greetings should be chat
-    # ------------------------------------
+    # greetings -> always chat
     if is_smalltalk_greeting(user_msg):
         touch_user(payload.user_id)
         return ChatOut(
@@ -511,20 +486,14 @@ def chat(payload: ChatIn):
             question=f"How are you feeling about **{need_label}** today?",
         )
 
-    # ------------------------------------
-    # Baseline flow (per need)
-    # 1) user gives baseline number -> ask reason
-    # 2) user gives reason -> allow plan generation
-    # ------------------------------------
+    # Baseline flow
     if awaiting_baseline_reason:
-        # treat this as baseline reason and end this flow
         _patch_conf_bucket(
             payload.user_id,
             conf_key,
             {
                 "awaiting_baseline_reason": False,
                 "baseline_reason": user_msg,
-                # ✅ clear any stale gating flags
                 "pending_plan_offer": False,
                 "pending_plan_confidence": False,
                 "pending_progress_confidence": False,
@@ -543,7 +512,6 @@ def chat(payload: ChatIn):
                         "baseline": level,
                         "awaiting_baseline_reason": True,
                         "baseline_set_at": datetime.now(timezone.utc).isoformat(),
-                        # ✅ clear any stale gating flags
                         "pending_plan_offer": False,
                         "pending_plan_confidence": False,
                         "pending_progress_confidence": False,
@@ -558,14 +526,10 @@ def chat(payload: ChatIn):
                     question=f"What’s the main reason it feels like a {level} (and not higher)?",
                 )
 
-    # ------------------------------------
-    # Gate #1: If we previously offered a plan,
-    # interpret yes/no FIRST (no Gemini).
-    # ------------------------------------
     plan_allowed_for_this_turn = False
 
+    # Gate #1: pending offer
     if pending_offer:
-        # user declines plans
         if _explicit_no_plan(user_msg):
             _patch_conf_bucket(payload.user_id, conf_key, {"pending_plan_offer": False})
             touch_user(payload.user_id)
@@ -577,9 +541,7 @@ def chat(payload: ChatIn):
                 question="What part is the hardest right now?",
             )
 
-        # ✅ user accepts offer with generic affirmation OR explicit plan request
         if _is_affirmation(user_msg) or _explicit_yes_plan(user_msg) or _wants_plan(user_msg):
-            # if they included a number in the same message, proceed immediately
             level = _parse_confidence_from_message(user_msg)
             if level is not None:
                 _patch_conf_bucket(
@@ -609,27 +571,19 @@ def chat(payload: ChatIn):
                     question=f"On a scale of 1–10, how confident do you feel about **{need_label}** right now?",
                 )
         else:
-            # not a yes/no; treat as regular chat and clear offer
             _patch_conf_bucket(payload.user_id, conf_key, {"pending_plan_offer": False})
             plan_allowed_for_this_turn = False
 
-    # ------------------------------------
-    # Gate #2: If we are waiting for a confidence
-    # rating before planning, do that now.
-    # ------------------------------------
+    # Gate #2: waiting confidence
     if pending_plan_conf:
         level = _parse_confidence_from_message(user_msg)
         if level is None:
-            # If user is confused ("for what?"), explain once (no loop-nagging)
             t = user_msg.lower().strip()
             if any(p in t for p in ["for what", "what for", "why", "why do you need", "what does it mean", "huh"]):
                 touch_user(payload.user_id)
                 return ChatOut(
                     mode="chat",
-                    message=(
-                        f"For your **{need_label}** 🙂 "
-                        "It helps me tune the plan to the right difficulty."
-                    ),
+                    message=(f"For your **{need_label}** 🙂 It helps me tune the plan to the right difficulty."),
                     tips=[],
                     plan=[],
                     question=f"So what number would you give your **{need_label}** right now (1–10)?",
@@ -656,11 +610,7 @@ def chat(payload: ChatIn):
         )
         plan_allowed_for_this_turn = True
 
-    # ------------------------------------
-    # ✅ NEW Gate: progress confidence follow-up
-    # When we asked "1–10 confidence now?" after progress,
-    # consume the next numeric message here (prevents looping).
-    # ------------------------------------
+    # Gate #3: progress confidence follow-up
     if pending_progress_conf:
         level = _parse_confidence_from_message(user_msg)
         if level is None:
@@ -691,9 +641,7 @@ def chat(payload: ChatIn):
             question="What’s one small thing that would move it up by 1 point?",
         )
 
-    # ------------------------------------
-    # Returning / progress check-ins (light)
-    # ------------------------------------
+    # Returning / progress check-ins
     returning_threshold_hours = 16
 
     if is_returning(user_msg) and has_plan and should_check_in(last_activity, hours=returning_threshold_hours):
@@ -706,7 +654,6 @@ def chat(payload: ChatIn):
             question="What did you manage to do — or what got in the way?",
         )
 
-    # ✅ UPDATED: set pending flag when asking progress-confidence
     if looks_like_progress(user_msg) and has_plan:
         _patch_conf_bucket(payload.user_id, conf_key, {"pending_progress_confidence": True})
         touch_user(payload.user_id)
@@ -718,11 +665,7 @@ def chat(payload: ChatIn):
             question=f"On a scale from 1–10, what’s your confidence in **{need_label}** right now?",
         )
 
-    # ------------------------------------
-    # After a short chat, offer plan permission
-    # (but do NOT generate plan yet)
-    # ✅ UPDATED: if a plan already exists, do NOT re-offer a new plan
-    # ------------------------------------
+    # Offer plan permission (but don't generate plan yet)
     if (not pending_offer) and (not pending_plan_conf) and _looks_like_user_wants_support(user_msg):
         if has_plan:
             touch_user(payload.user_id)
@@ -744,7 +687,6 @@ def chat(payload: ChatIn):
             question=f"If you want a plan, I’ll ask one quick thing first: what’s your confidence in **{need_label}** (1–10)?",
         )
 
-    # If they explicitly say "no plan" at any time (outside pending_offer), honor it and stay chatty
     if _explicit_no_plan(user_msg):
         _patch_conf_bucket(
             payload.user_id,
@@ -764,12 +706,10 @@ def chat(payload: ChatIn):
             question="What’s on your mind?",
         )
 
-    # If they explicitly ask for a plan/revision, require confidence first (unless they include it now)
     asked_for_plan_now = _wants_plan(user_msg) or _explicit_yes_plan(user_msg) or _wants_new_or_revision(user_msg)
     confidence_in_msg = _parse_confidence_from_message(user_msg)
 
     if asked_for_plan_now and baseline is not None and not plan_allowed_for_this_turn:
-        # If they already included confidence in this message, proceed.
         if confidence_in_msg is not None:
             _patch_conf_bucket(
                 payload.user_id,
@@ -788,7 +728,6 @@ def chat(payload: ChatIn):
                 question=f"On a scale of 1–10, how confident do you feel about **{need_label}** right now?",
             )
 
-    # If user is emotional and not asking for plan, keep it friend-only (no plan/tips)
     if _is_emotional(user_msg) and not asked_for_plan_now and not plan_allowed_for_this_turn and baseline_reason is None:
         touch_user(payload.user_id)
         return ChatOut(
@@ -814,9 +753,6 @@ def chat(payload: ChatIn):
     contents.extend(_history_to_contents(history_dicts, limit=15))
     contents.append(types.Content(role="user", parts=[types.Part(text=user_msg)]))
 
-    # ---------------------------
-    # System prompt (friend-first)
-    # ---------------------------
     system = (
         "You are a supportive, friend-like confidence coach.\n"
         "Return ONLY raw JSON (no markdown, no backticks, no extra text).\n"
@@ -867,15 +803,31 @@ def chat(payload: ChatIn):
             ),
         )
 
-        raw = resp.text or ""
+        raw = (resp.text or "").strip()
+        if not raw:
+            # ✅ Never 500; return a friendly fallback
+            return ChatOut(
+                mode="chat",
+                message="Hmm — I didn’t get a response back. Want to try that again?",
+                tips=[],
+                plan=[],
+                question="What would you like to focus on right now?",
+            )
+
         try:
             data = json.loads(raw)
         except Exception:
             data = extract_json_object(raw)
 
         if not data:
-            print("❌ Gemini returned non-JSON:\n", raw[:2000])
-            raise HTTPException(status_code=500, detail="Gemini did not return valid JSON. Check logs.")
+            print("❌ Gemini returned non-JSON. Raw (first 2000 chars):\n", raw[:2000])
+            return ChatOut(
+                mode="chat",
+                message="I got a messy response from the AI service 😅 Can you try again?",
+                tips=[],
+                plan=[],
+                question=f"What’s the main thing about **{need_label}** you want help with?",
+            )
 
         mode = str(data.get("mode", "chat")).strip().lower()
         message = str(data.get("message", "")).strip()
@@ -888,7 +840,13 @@ def chat(payload: ChatIn):
             mode = "chat"
 
         if not message:
-            raise HTTPException(status_code=500, detail="Gemini returned invalid JSON: missing message.")
+            return ChatOut(
+                mode="chat",
+                message="I’m here — say a little more and I’ll help. 🙂",
+                tips=[],
+                plan=[],
+                question=f"What’s going on with **{need_label}** right now?",
+            )
 
         tips_clean: List[str] = []
         if isinstance(tips, list):
@@ -928,12 +886,7 @@ def chat(payload: ChatIn):
 
         plan_clean = plan_clean[:5]
 
-        # ------------------------------------
-        # HARD-BLOCK: only allow plans when:
-        # - baseline_reason flow (first plan after baseline reason), OR
-        # - plan_allowed_for_this_turn (user agreed + we checked confidence), OR
-        # - user explicitly asked AND included confidence in same message
-        # ------------------------------------
+        # Allow plan?
         allow_plan_output = False
         confidence_in_same_msg = _parse_confidence_from_message(user_msg) is not None
 
@@ -946,7 +899,7 @@ def chat(payload: ChatIn):
 
         if plan_clean and not allow_plan_output:
             plan_clean = []
-            tips_clean = []  # keep friend-like if we block plan
+            tips_clean = []
             mode = "chat"
             if not question:
                 question = f"Do you want a small plan for **{need_label}**, or would you rather just talk for now?"
@@ -954,7 +907,7 @@ def chat(payload: ChatIn):
         if plan_clean and allow_plan_output:
             mode = "coach"
 
-        # Persist plan per focus+need ONLY if allowed and a plan exists
+        # Persist plan
         if plan_clean and allow_plan_output:
             serializable: List[Any] = []
             for it in plan_clean:
@@ -977,9 +930,12 @@ def chat(payload: ChatIn):
             question=question,
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
+        # ✅ KEY CHANGE: do NOT raise HTTPException(500)
+        # Log real root cause for debugging
+        print("❌ AI ERROR:", repr(e))
+        traceback.print_exc()
+
         msg = str(e)
         if "RESOURCE_EXHAUSTED" in msg or "quota" in msg.lower():
             return ChatOut(
@@ -989,12 +945,18 @@ def chat(payload: ChatIn):
                 plan=[],
                 question="Can we pick this up again shortly?",
             )
-        print("❌ Gemini error:", repr(e))
-        raise HTTPException(status_code=500, detail="AI service error")
+
+        return ChatOut(
+            mode="chat",
+            message="Sorry — I hit an AI service hiccup. Can you try again?",
+            tips=[],
+            plan=[],
+            question=f"What part of **{need_label}** do you want to tackle first?",
+        )
 
 
 # ---------------------------
-# Inactivity check-in endpoint (per focus+need)
+# Inactivity check-in endpoint
 # ---------------------------
 @router.post("/checkin", response_model=CheckInOut)
 def checkin(payload: CheckInIn):
@@ -1017,7 +979,6 @@ def checkin(payload: CheckInIn):
     if inactive_for < threshold:
         return {"should_send": False, "message": ""}
 
-    # per-key checkin throttle
     last_checkins = st.get("last_checkin_at", {})
     last_checkin_iso = None
     if isinstance(last_checkins, dict):
@@ -1073,4 +1034,7 @@ def checkin(payload: CheckInIn):
         return {"should_send": True, "message": msg}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini check-in error: {str(e)}")
+        # ✅ Do not 500 here either (checkins should fail silently)
+        print("❌ CHECKIN AI ERROR:", repr(e))
+        traceback.print_exc()
+        return {"should_send": False, "message": ""}
