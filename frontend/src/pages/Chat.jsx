@@ -103,8 +103,15 @@ function MermaidDiagram({ code }) {
     const run = async () => {
       try {
         if (!ref.current) return;
+
+        const src = String(code || "").trim();
+        if (!src) {
+          ref.current.innerHTML = "<div style='opacity:.8'>No diagram.</div>";
+          return;
+        }
+
         const id = `mmd-${Math.random().toString(16).slice(2)}`;
-        const { svg } = await mermaid.render(id, code);
+        const { svg } = await mermaid.render(id, src);
         if (!cancelled && ref.current) ref.current.innerHTML = svg;
       } catch {
         if (!cancelled && ref.current) {
@@ -153,10 +160,11 @@ function getAxiosErrorMessage(err) {
  * Map your UI "need" to backend topics.
  * Backend expects "topic" like: interview_confidence, work_focus, etc.
  * We’ll pass the best guess; backend also infers if missing.
+ *
+ * ✅ IMPORTANT: do NOT always force focus=work -> work_focus.
+ * Need selection should win.
  */
 function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
-  if (focus === "work") return "work_focus";
-
   if (needKey === "interview") return "interview_confidence";
   if (needKey === "presentation") return "presentation_confidence";
   if (needKey === "communication") return "relationship_communication";
@@ -169,6 +177,8 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
     return slug ? `custom_${slug}` : "general";
   }
 
+  // Fallback if user didn’t pick a confidence need
+  if (focus === "work") return "work_focus";
   return "general";
 }
 
@@ -218,6 +228,7 @@ export default function Chat() {
   // ✅ need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
+  // ✅ active need for daily check-in (store ONLY the need key, not custom slug)
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
 
   const NEED_OPTIONS = [
@@ -232,9 +243,13 @@ export default function Chat() {
 
   const [needKey, setNeedKey] = useState(() => {
     const active = loadSaved(activeNeedStorage, null);
-    if (active) return String(active);
+    // Only accept values that exist in NEED_OPTIONS
+    if (active && NEED_OPTIONS.some((n) => n.key === String(active))) return String(active);
+
     const saved = loadSaved(needKeyStorage, null);
-    return saved ? String(saved) : "interview";
+    if (saved && NEED_OPTIONS.some((n) => n.key === String(saved))) return String(saved);
+
+    return "interview";
   });
 
   const [customNeedLabel, setCustomNeedLabel] = useState(() => {
@@ -278,6 +293,7 @@ export default function Chat() {
 
   const [plansHydrated, setPlansHydrated] = useState(false);
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
+  const [chatHydrated, setChatHydrated] = useState(false);
 
   // (Optional) keep your confidence UX; backend will not force it
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
@@ -295,7 +311,9 @@ export default function Chat() {
 
   // Load per-need chat messages (persistent)
   useEffect(() => {
+    setChatHydrated(false);
     setMessages(loadSaved(chatKey, []));
+    setChatHydrated(true);
   }, [chatKey]);
 
   // Load global plans
@@ -376,6 +394,7 @@ export default function Chat() {
 
   // Baseline trigger + daily check-in trigger (your UX; backend is non-blocking)
   useEffect(() => {
+    if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
 
     const conf = loadSaved(confidenceKey, null);
@@ -428,15 +447,13 @@ export default function Chat() {
       setAwaitingBaselineReason(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
+  }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
 
   const acceptPlan = (planObj) => {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
 
-    const activeNeedKey =
-      accepted?.needKey === "custom" ? `custom_${slugify(accepted?.needLabel) || "custom"}` : accepted?.needKey || needKey;
-
-    save(activeNeedStorage, activeNeedKey);
+    // ✅ Store ONLY the needKey (must match dropdown options)
+    save(activeNeedStorage, accepted?.needKey || needKey);
 
     setPlans((prev) => {
       const dedup = prev.filter((p) => p.id !== accepted.id);
@@ -469,8 +486,6 @@ export default function Chat() {
   };
 
   const revisePlan = async () => {
-    // New backend behavior: refinement happens only if user asks to refine.
-    // We’ll prompt user to type a refine request, then send it normally.
     setMessages((prev) => [
       ...prev,
       {
@@ -484,7 +499,13 @@ export default function Chat() {
     ]);
   };
 
-  async function callCoachBackend(outboundText) {
+  function alreadyHasRecentReachError(prev) {
+    const last = prev?.length ? prev[prev.length - 1] : null;
+    const txt = String(last?.message || last?.text || "");
+    return last?.role === "assistant" && last?.type === "text" && txt.includes("couldn’t reach the coach");
+  }
+
+  async function callCoachBackend(outboundText, didRetry = false) {
     const mySeq = ++reqSeqRef.current;
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
 
@@ -541,6 +562,7 @@ export default function Chat() {
             : (() => {
                 const safe = (t) => String(t || "").replace(/"/g, '\\"');
                 const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
+                if (!steps.length) return `flowchart TD\nA["${safe(planObj.title || "Plan")}"]`;
                 const first = steps?.[0]?.id || "S1";
                 const nodes = steps.map((s) => `${s.id}["${safe(s.label)}"]`).join("\n");
                 const edges = steps
@@ -577,20 +599,32 @@ ${edges}
       }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
+
+      // ✅ One silent retry (helps cold starts / temporary blips)
+      if (!didRetry) {
+        await new Promise((r) => setTimeout(r, 800));
+        return callCoachBackend(outboundText, true);
+      }
+
       const msg = getAxiosErrorMessage(err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "chat",
-          message:
-            msg === "Request timed out."
-              ? "Sorry — the coach is taking too long. Please try sending again."
-              : "Sorry — I couldn’t reach the coach just now. Please try again.",
-        },
-      ]);
+      const finalText =
+        msg === "Request timed out."
+          ? "Sorry — the coach is taking too long. Please try sending again."
+          : "Sorry — I couldn’t reach the coach just now. Please try again.";
+
+      setMessages((prev) => {
+        if (alreadyHasRecentReachError(prev) && finalText.includes("couldn’t reach the coach")) return prev;
+        return [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "text",
+            mode: "chat",
+            message: finalText,
+          },
+        ];
+      });
     }
   }
 
@@ -717,7 +751,13 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+            },
           ]);
           return;
         }
@@ -746,7 +786,13 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+            },
           ]);
           return;
         }
@@ -808,20 +854,83 @@ ${edges}
       color: "var(--text-primary, #111827)",
     },
     muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
-    bubbleUser: { background: "var(--bg-chat-user, #111827)", color: "var(--text-inverse, #ffffff)", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
-    bubbleCoach: { background: "var(--bg-chat-coach, #f3f4f6)", color: "var(--text-primary, #111827)", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
-    btn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "var(--bg-page, #ffffff)", color: "var(--text-primary, #111827)", padding: "0 12px", cursor: "pointer" },
-    primaryBtn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "var(--bg-chat-user, #111827)", color: "var(--text-inverse, #ffffff)", padding: "0 12px", cursor: "pointer" },
+    bubbleUser: {
+      background: "var(--bg-chat-user, #111827)",
+      color: "var(--text-inverse, #ffffff)",
+      borderRadius: 12,
+      padding: 12,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.45,
+    },
+    bubbleCoach: {
+      background: "var(--bg-chat-coach, #f3f4f6)",
+      color: "var(--text-primary, #111827)",
+      borderRadius: 12,
+      padding: 12,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.45,
+    },
+    btn: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "var(--bg-page, #ffffff)",
+      color: "var(--text-primary, #111827)",
+      padding: "0 12px",
+      cursor: "pointer",
+    },
+    primaryBtn: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "var(--bg-chat-user, #111827)",
+      color: "var(--text-inverse, #ffffff)",
+      padding: "0 12px",
+      cursor: "pointer",
+    },
     card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "var(--bg-page, #ffffff)" },
-    badge: { display: "inline-block", fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid var(--border-soft, #e5e7eb)", opacity: 0.9, marginLeft: 8 },
-    sendBtn: { marginTop: 8, height: 42, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "var(--bg-chat-user, #111827)", color: "var(--text-inverse, #ffffff)", padding: "0 14px", cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.7 : 1 },
+    badge: {
+      display: "inline-block",
+      fontSize: 12,
+      padding: "2px 8px",
+      borderRadius: 999,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      opacity: 0.9,
+      marginLeft: 8,
+    },
+    sendBtn: {
+      marginTop: 8,
+      height: 42,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "var(--bg-chat-user, #111827)",
+      color: "var(--text-inverse, #ffffff)",
+      padding: "0 14px",
+      cursor: loading ? "not-allowed" : "pointer",
+      opacity: loading ? 0.7 : 1,
+    },
     hint: { fontSize: 12, marginTop: 6, opacity: 0.85, color: "var(--text-muted, #6b7280)" },
     resources: { marginTop: 6, fontSize: 13, opacity: 0.92 },
     linkList: { margin: "6px 0 0", paddingLeft: 18 },
     progressBtns: { display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" },
     needRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-    select: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "var(--bg-page, #ffffff)", color: "var(--text-primary, #111827)" },
-    smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "var(--bg-page, #ffffff)", color: "var(--text-primary, #111827)", minWidth: 220 },
+    select: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "var(--bg-page, #ffffff)",
+      color: "var(--text-primary, #111827)",
+    },
+    smallInput: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "var(--bg-page, #ffffff)",
+      color: "var(--text-primary, #111827)",
+      minWidth: 220,
+    },
   };
 
   const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
