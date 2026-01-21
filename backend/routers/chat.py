@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -271,11 +272,9 @@ def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) 
 
     if plan_requested(user_text):
         if has_active_plan:
-            # Asking about plan != editing plan
             return "CHAT", None
         return "PLAN_BUILD", "DISCOVERY"
 
-    # Continue PLAN_BUILD only if discovery is still in progress
     if state.get("mode") == "PLAN_BUILD":
         if pb.get("step") == "DISCOVERY" and (pb.get("discovery_questions_asked") or 0) < len(DISCOVERY_QUESTIONS):
             return "PLAN_BUILD", "DISCOVERY"
@@ -301,7 +300,7 @@ def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str
 
 
 # ---------------------------
-# Learning resources (curated catalog + keyword router)
+# Learning resources
 # ---------------------------
 RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
     "mlops": [
@@ -315,82 +314,33 @@ RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
             "url": "https://cloud.google.com/vertex-ai/docs/pipelines/introduction",
             "type": "doc",
         },
-        {
-            "title": "MLflow Tracking (official docs)",
-            "url": "https://mlflow.org/docs/latest/tracking.html",
-            "type": "doc",
-        },
-        {
-            "title": "Model monitoring concepts (Vertex AI)",
-            "url": "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview",
-            "type": "doc",
-        },
+        {"title": "MLflow Tracking (official docs)", "url": "https://mlflow.org/docs/latest/tracking.html", "type": "doc"},
+        {"title": "Model monitoring concepts (Vertex AI)", "url": "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview", "type": "doc"},
     ],
     "system_design": [
-        {
-            "title": "Google Cloud Architecture Center",
-            "url": "https://cloud.google.com/architecture",
-            "type": "doc",
-        },
-        {
-            "title": "Google SRE Workbook (reliability patterns)",
-            "url": "https://sre.google/workbook/table-of-contents/",
-            "type": "book",
-        },
+        {"title": "Google Cloud Architecture Center", "url": "https://cloud.google.com/architecture", "type": "doc"},
+        {"title": "Google SRE Workbook (reliability patterns)", "url": "https://sre.google/workbook/table-of-contents/", "type": "book"},
     ],
     "data_engineering": [
-        {
-            "title": "BigQuery documentation",
-            "url": "https://cloud.google.com/bigquery/docs",
-            "type": "doc",
-        },
-        {
-            "title": "BigQuery best practices",
-            "url": "https://cloud.google.com/bigquery/docs/best-practices-performance-overview",
-            "type": "doc",
-        },
-        {
-            "title": "Cloud Storage documentation",
-            "url": "https://cloud.google.com/storage/docs",
-            "type": "doc",
-        },
+        {"title": "BigQuery documentation", "url": "https://cloud.google.com/bigquery/docs", "type": "doc"},
+        {"title": "BigQuery best practices", "url": "https://cloud.google.com/bigquery/docs/best-practices-performance-overview", "type": "doc"},
+        {"title": "Cloud Storage documentation", "url": "https://cloud.google.com/storage/docs", "type": "doc"},
     ],
     "kubernetes": [
-        {
-            "title": "Kubernetes Basics",
-            "url": "https://kubernetes.io/docs/tutorials/kubernetes-basics/",
-            "type": "doc",
-        },
-        {
-            "title": "Kubernetes Deployments",
-            "url": "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/",
-            "type": "doc",
-        },
+        {"title": "Kubernetes Basics", "url": "https://kubernetes.io/docs/tutorials/kubernetes-basics/", "type": "doc"},
+        {"title": "Kubernetes Deployments", "url": "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/", "type": "doc"},
     ],
     "interview": [
-        {
-            "title": "STAR interview method (overview)",
-            "url": "https://en.wikipedia.org/wiki/Situation,_task,_action,_result",
-            "type": "article",
-        },
-        {
-            "title": "System design primer (GitHub)",
-            "url": "https://github.com/donnemartin/system-design-primer",
-            "type": "repo",
-        },
+        {"title": "STAR interview method (overview)", "url": "https://en.wikipedia.org/wiki/Situation,_task,_action,_result", "type": "article"},
+        {"title": "System design primer (GitHub)", "url": "https://github.com/donnemartin/system-design-primer", "type": "repo"},
     ],
 }
 
 
 def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
-    """
-    Stable, real links. No hallucinated URLs.
-    Picks a few resources based on keywords and topic.
-    """
     t = (task_text or "").lower()
     picks: List[Dict[str, str]] = []
 
-    # Keyword routing
     if any(k in t for k in ["mlops", "pipeline", "deployment", "serving", "monitor", "drift", "registry", "version"]):
         picks += RESOURCE_CATALOG["mlops"]
     if any(k in t for k in ["bigquery", "sql", "etl", "elt", "warehouse", "dataflow", "spark", "composer", "airflow", "gcs", "storage"]):
@@ -402,11 +352,9 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
     if any(k in t for k in ["behavioral", "star", "mock interview", "interview", "tell me about yourself"]):
         picks += RESOURCE_CATALOG["interview"]
 
-    # Topic fallback
     if not picks and topic_key == "interview_confidence":
         picks += RESOURCE_CATALOG["interview"] + RESOURCE_CATALOG["system_design"] + RESOURCE_CATALOG["mlops"]
 
-    # Dedupe + cap
     seen = set()
     out: List[Dict[str, str]] = []
     for r in picks:
@@ -427,7 +375,12 @@ def gemini_text(system: str, user: str) -> str:
     try:
         resp = client.models.generate_content(
             model=GEMINI_MODEL,
-            contents=[types.Content(role="user", parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")])],
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]
+                )
+            ],
             config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
         )
         text = getattr(resp, "text", None)
@@ -438,7 +391,22 @@ def gemini_text(system: str, user: str) -> str:
             return "".join([p.text for p in parts if getattr(p, "text", None)]).strip()
         return ""
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gemini error: {e}")
+        # ✅ This will show up in Render logs
+        print("❌ GEMINI CALL FAILED")
+        print("Model:", GEMINI_MODEL)
+        print("Error:", repr(e))
+        traceback.print_exc()
+        # Keep response body helpful for your frontend too
+        raise HTTPException(status_code=500, detail=f"Gemini error: {repr(e)}")
+
+
+# ---------------------------
+# Debug endpoint (call from browser or curl)
+# ---------------------------
+@router.get("/debug/ping-gemini")
+def ping_gemini():
+    txt = gemini_text("Reply with exactly the word OK.", "ping")
+    return {"ok": True, "model": GEMINI_MODEL, "reply": txt}
 
 
 def extract_bullets(text: str, max_items: int = 10) -> List[str]:
@@ -523,13 +491,7 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
 
     tasks = []
     for t in task_texts:
-        tasks.append(
-            {
-                "text": t,
-                "status": "todo",
-                "resources": pick_resources(topic_key, t, max_items=3),
-            }
-        )
+        tasks.append({"text": t, "status": "todo", "resources": pick_resources(topic_key, t, max_items=3)})
 
     plan = {
         "id": plan_id,
@@ -818,11 +780,9 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not user_text:
         raise HTTPException(status_code=400, detail="Empty message")
 
-    # Fast warm-up ping: no Gemini, no state churn
     if user_text.lower() == "ping":
         return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
 
-    # Append user message to history
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
     state["history"] = state["history"][-80:]
 
