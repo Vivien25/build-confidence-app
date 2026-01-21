@@ -8,6 +8,9 @@ import ConversationPlansSidebar from "../components/ConversationPlansSidebar";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
+// ✅ Add a request timeout so “typing…” can’t hang forever
+const AXIOS_TIMEOUT_MS = Number(import.meta.env.VITE_CHAT_TIMEOUT_MS || 20000);
+
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 // ---------- localStorage helpers (persistent) ----------
@@ -207,6 +210,21 @@ function upsertSystemMessage(setMessages, msg) {
   });
 }
 
+// ✅ Friendly error extraction (prevents “AI service error” feeling harsh)
+function getAxiosErrorMessage(err) {
+  const detail = err?.response?.data?.detail;
+  const message = err?.response?.data?.message;
+  const error = err?.response?.data?.error;
+
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (typeof message === "string" && message.trim()) return message.trim();
+  if (typeof error === "string" && error.trim()) return error.trim();
+
+  if (err?.code === "ECONNABORTED") return "Request timed out.";
+  if (typeof err?.message === "string" && err.message.trim()) return err.message.trim();
+  return "Network or server error.";
+}
+
 export default function Chat() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getProfile() || {});
@@ -217,14 +235,13 @@ export default function Chat() {
 
   const userAvatarKey = profile?.avatar ?? "neutral";
   const userAvatar = avatarMap[userAvatarKey];
-  
+
   // ✅ coach picked on Welcome page (defaults to mira)
   const coachId = profile?.coachId || "mira";
-   const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || {
+  const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || {
     name: "Coach",
-    avatar: userAvatar?.img, // fallback (or a default image)
-   };
-   
+    avatar: userAvatar?.img,
+  };
 
   const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
@@ -276,7 +293,7 @@ export default function Chat() {
     saveSession(hasSpokenKey, hasUserSpoken);
   }, [hasSpokenKey, hasUserSpoken]);
 
-  // ✅ NEW: only start baseline prompts after the user asks for a plan (this visit)
+  // ✅ only start baseline prompts after the user asks for a plan (this visit)
   const readyKey = `bc_ready_for_baseline_${userId}_${focus}_${needSlug}`;
   const [readyForBaseline, setReadyForBaseline] = useState(() => loadSession(readyKey, false));
   useEffect(() => {
@@ -287,6 +304,7 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
 
+  // ✅ Prevent double-send
   const sendingRef = useRef(false);
 
   const [plans, setPlans] = useState([]);
@@ -304,6 +322,9 @@ export default function Chat() {
   const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(false);
 
   const listRef = useRef(null);
+
+  // ✅ Track last request so late responses can’t overwrite newer state
+  const reqSeqRef = useRef(0);
 
   // Load per-need chat messages
   useEffect(() => {
@@ -357,8 +378,6 @@ export default function Chat() {
     setAwaitingBaselineReason(false);
     setAwaitingDailyProgress(false);
     setAwaitingDailyConfidence(false);
-
-    // ✅ allow short chat again when switching needs (fresh visit behavior)
     setReadyForBaseline(false);
 
     setMessages((prev) =>
@@ -378,8 +397,6 @@ export default function Chat() {
 
   // Baseline trigger + daily check-in trigger (per need)
   useEffect(() => {
-    // ✅ NEW: do NOT prompt baseline at the beginning.
-    // Only prompt once the user has spoken AND asked for a plan (readyForBaseline).
     if (!hasUserSpoken || !readyForBaseline) return;
 
     const conf = loadSaved(confidenceKey, null);
@@ -389,7 +406,6 @@ export default function Chat() {
 
     if (needKey === "custom" && !customNeedLabel.trim()) return;
 
-    // If no baseline yet -> ask baseline number
     if (!conf || typeof conf?.baseline !== "number") {
       if (!awaitingBaseline && !awaitingBaselineReason) {
         setAwaitingBaseline(true);
@@ -410,7 +426,6 @@ export default function Chat() {
       return;
     }
 
-    // Baseline exists: if we haven't checked in today, ask PROGRESS first
     const lastChecked = String(conf?.lastCheckDate || "");
     if (lastChecked !== t) {
       if (!awaitingDailyProgress && !awaitingDailyConfidence) {
@@ -418,7 +433,6 @@ export default function Chat() {
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(false);
 
-        // ✅ IMPORTANT: use type "daily_progress" so UI shows buttons
         upsertSystemMessage(setMessages, {
           id: `system_daily_${focus}_${needSlug}`,
           role: "assistant",
@@ -447,19 +461,16 @@ export default function Chat() {
 
     save(activeNeedStorage, activeNeedKey);
 
-    // Global plans (for /plans)
     setPlans((prev) => {
       const dedup = prev.filter((p) => p.id !== accepted.id);
       return [accepted, ...dedup];
     });
 
-    // Plans from this conversation
     setConvPlans((prev) => {
       const dedup = prev.filter((p) => p.id !== accepted.id);
       return [accepted, ...dedup];
     });
 
-    // Mark accepted in chat
     setMessages((prev) =>
       prev.map((m) => {
         if (m.type === "plan" && m.plan?.id === planObj.id) return { ...m, accepted: true };
@@ -496,86 +507,118 @@ export default function Chat() {
     ]);
   };
 
+  // ✅ UPDATED: backend call is safe: timeout + graceful fallback + ignores late responses
   async function callCoachBackend(outboundText, currentMessages) {
     const history = toHistory(currentMessages, 12);
+    const mySeq = ++reqSeqRef.current;
 
-    const res = await axios.post(`${API_BASE}/chat`, {
-      user_id: userId,
-      focus,
-      need_key: needKey,
-      need_label: currentNeedLabel(),
-      message: outboundText,
-      history,
-    });
+    try {
+      const res = await axios.post(
+        `${API_BASE}/chat`,
+        {
+          user_id: userId,
+          focus,
+          need_key: needKey,
+          need_label: currentNeedLabel(),
+          message: outboundText,
+          history,
+        },
+        { timeout: AXIOS_TIMEOUT_MS }
+      );
 
-    const mode = String(res.data?.mode || "chat").toLowerCase();
-    const message = String(res.data?.message || "").trim();
-    const planRaw = Array.isArray(res.data?.plan) ? res.data.plan : [];
+      // If another newer request started, ignore this response (prevents weird overwrites)
+      if (mySeq !== reqSeqRef.current) return;
 
-    if (message) {
+      const mode = String(res.data?.mode || "chat").toLowerCase();
+      const message = String(res.data?.message || "").trim();
+      const planRaw = Array.isArray(res.data?.plan) ? res.data.plan : [];
+
+      if (message) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "text",
+            mode: mode === "coach" ? "coach" : "chat",
+            message,
+          },
+        ]);
+      }
+
+      const cleanedSteps = planRaw
+        .map((x) => (typeof x === "string" ? x.trim() : x))
+        .filter((x) => (typeof x === "string" ? x.trim() : String(x?.label || "").trim()))
+        .slice(0, 6);
+
+      if (cleanedSteps.length > 0) {
+        const planObj = buildPlanFromSteps({
+          focus,
+          needKey,
+          needLabel: currentNeedLabel(),
+          steps: cleanedSteps,
+        });
+        const diagram = planToMermaid(planObj);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "plan",
+            mode: "coach",
+            plan: planObj,
+            mermaid: diagram,
+            accepted: false,
+          },
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "plan_accept",
+            mode: "coach",
+            planId: planObj.id,
+            accepted: false,
+          },
+        ]);
+      }
+    } catch (err) {
+      if (mySeq !== reqSeqRef.current) return;
+
+      const msg = getAxiosErrorMessage(err);
       setMessages((prev) => [
         ...prev,
         {
           id: uid("msg"),
           role: "assistant",
           type: "text",
-          mode: mode === "coach" ? "coach" : "chat",
-          message,
-        },
-      ]);
-    }
-
-    const cleanedSteps = planRaw
-      .map((x) => (typeof x === "string" ? x.trim() : x))
-      .filter((x) => (typeof x === "string" ? x.trim() : String(x?.label || "").trim()))
-      .slice(0, 6);
-
-    if (cleanedSteps.length > 0) {
-      const planObj = buildPlanFromSteps({
-        focus,
-        needKey,
-        needLabel: currentNeedLabel(),
-        steps: cleanedSteps,
-      });
-      const diagram = planToMermaid(planObj);
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "plan",
-          mode: "coach",
-          plan: planObj,
-          mermaid: diagram,
-          accepted: false,
-        },
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "plan_accept",
-          mode: "coach",
-          planId: planObj.id,
-          accepted: false,
+          mode: "chat",
+          message:
+            msg === "Request timed out."
+              ? "Sorry — the coach is taking too long to respond. Can you try sending that again?"
+              : "Sorry — I couldn’t reach the coach just now. Please try again.",
         },
       ]);
     }
   }
 
-  // ✅ NEW: silently sync baseline to backend to prevent backend mis-parsing "1) 2) 3)" etc.
+  // ✅ NEW: silently sync baseline to backend
   async function syncBaselineToBackend(level, currentMessages) {
+    const history = toHistory(currentMessages, 12);
     try {
-      const history = toHistory(currentMessages, 12);
-      await axios.post(`${API_BASE}/chat`, {
-        user_id: userId,
-        focus,
-        need_key: needKey,
-        need_label: currentNeedLabel(),
-        message: String(level), // IMPORTANT: only the number
-        history,
-      });
+      await axios.post(
+        `${API_BASE}/chat`,
+        {
+          user_id: userId,
+          focus,
+          need_key: needKey,
+          need_label: currentNeedLabel(),
+          message: String(level),
+          history,
+        },
+        { timeout: AXIOS_TIMEOUT_MS }
+      );
     } catch {
-      // ignore (frontend still works)
+      // ignore
     }
   }
 
@@ -632,6 +675,7 @@ export default function Chat() {
     }
 
     setLoading(true);
+    sendingRef.current = true;
     try {
       const nextMessages = [...messages, { id: uid("msg"), role: "user", text: "Not yet." }];
 
@@ -643,6 +687,7 @@ export default function Chat() {
       );
     } finally {
       setLoading(false);
+      sendingRef.current = false;
     }
   };
 
@@ -658,7 +703,7 @@ export default function Chat() {
           role: "assistant",
           type: "text",
           mode: "coach",
-          message: "Quick one — what would you like to call this confidence area? (Example: “Executive presence”)",
+          message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)',
         },
       ]);
       return;
@@ -670,17 +715,15 @@ export default function Chat() {
     setInput("");
     setLoading(true);
 
-    // ✅ only mark "hasUserSpoken" if not a greeting
     if (!isGreeting(userText)) {
       setHasUserSpoken(true);
     }
 
-    // ✅ NEW: unlock baseline prompts only after user asks for a plan
     if (!readyForBaseline && userAskedForPlan(userText)) {
       setReadyForBaseline(true);
     }
 
-    const userMsgObj = { id: uid("msg"), role: "user", text: userText };
+    const userMsgObj = { id: uid("msg"), role: "user", text: userText, type: "text" };
     const nextMessages = [...messages, userMsgObj];
     setMessages(nextMessages);
 
@@ -691,7 +734,6 @@ export default function Chat() {
       if (awaitingBaselineReason) {
         setAwaitingBaselineReason(false);
 
-        // ✅ safer text: no numbered "1) 2) 3)" which can confuse the backend
         await callCoachBackend(
           `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. ` +
             `Please respond with empathy, give a few suggestions, include learning links, and propose a short plan for "${nLabel}".`,
@@ -717,14 +759,11 @@ export default function Chat() {
         }
 
         saveConfidence(level);
-
-        // ✅ NEW: keep backend baseline in sync
         await syncBaselineToBackend(level, nextMessages);
 
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(true);
 
-        // ✅ remove old baseline prompt so it doesn't look like it's repeating
         setMessages((prev) => prev.filter((m) => !(m.type === "system" && m.kind === "baseline_prompt")));
 
         upsertSystemMessage(setMessages, {
@@ -766,18 +805,8 @@ export default function Chat() {
       }
 
       await callCoachBackend(`[Need: ${nLabel}] ${userText}`, nextMessages);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "chat",
-          message: "Sorry — something went wrong while talking to the coach.",
-        },
-      ]);
     } finally {
+      // ✅ ALWAYS clear loading + sending flags
       setLoading(false);
       sendingRef.current = false;
     }
@@ -916,7 +945,7 @@ export default function Chat() {
     <div style={styles.page}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
-         <h2 style={{ margin: 0 }}>Better Me</h2>
+          <h2 style={{ margin: 0 }}>Better Me</h2>
           <div style={{ ...styles.muted, marginTop: 6 }}>
             Focus: <b>{focusLabel(focus)}</b> • Need: <b>{needLabel}</b>
           </div>
