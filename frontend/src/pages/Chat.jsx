@@ -92,7 +92,7 @@ function userAskedForPlan(text) {
   return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule|prep)\b/.test(t);
 }
 
-// ---------- Learning links generator (fallback when backend doesn’t provide resources) ----------
+// ---------- Learning links generator (fallback) ----------
 function defaultResourcesForStep(stepLabel) {
   const s = String(stepLabel || "").toLowerCase();
 
@@ -111,7 +111,11 @@ function defaultResourcesForStep(stepLabel) {
   const ML_SYSTEMS = [
     { title: "Rules of ML (Google)", url: "https://developers.google.com/machine-learning/guides/rules-of-ml", type: "doc" },
     { title: "Reliable ML (Google)", url: "https://developers.google.com/machine-learning/guides/reliable-ml", type: "doc" },
-    { title: "MLOps pipelines (Google Cloud)", url: "https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning", type: "doc" },
+    {
+      title: "MLOps pipelines (Google Cloud)",
+      url: "https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning",
+      type: "doc",
+    },
   ];
 
   const BEHAVIORAL = [
@@ -120,10 +124,8 @@ function defaultResourcesForStep(stepLabel) {
     { title: "STAR method worksheet (Indeed)", url: "https://www.indeed.com/career-advice/interviewing/star-method", type: "article" },
   ];
 
-  // coding hints
   if (s.includes("leetcode") || s.includes("algorithm") || s.includes("complexity") || s.includes("coding") || s.includes("code")) return CODING;
 
-  // system design hints
   if (s.includes("system design") || s.includes("architecture") || s.includes("design") || s.includes("tradeoff") || s.includes("scal")) {
     return [
       { title: "System design primer (GitHub)", url: "https://github.com/donnemartin/system-design-primer", type: "repo" },
@@ -132,29 +134,42 @@ function defaultResourcesForStep(stepLabel) {
     ];
   }
 
-  // ML / inference hints
   if (s.includes("ml") || s.includes("model") || s.includes("inference") || s.includes("serving") || s.includes("latency") || s.includes("eval")) return ML_SYSTEMS;
 
-  // behavioral hints
   if (s.includes("star") || s.includes("story") || s.includes("behavior") || s.includes("project") || s.includes("experience")) return BEHAVIORAL;
 
   return COMMON;
 }
 
 function ensureResourcesOnSteps(planObj) {
-  const steps = Array.isArray(planObj?.steps) ? planObj.steps : [];
-  return {
-    ...planObj,
-    steps: steps.map((s) => {
-      const has = Array.isArray(s?.resources) && s.resources.length > 0;
-      return { ...s, resources: has ? s.resources : defaultResourcesForStep(s?.label).slice(0, 3) };
-    }),
-  };
+  if (!planObj || typeof planObj !== "object") return planObj;
+
+  const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
+  const nextSteps = steps.map((s) => {
+    const has = Array.isArray(s?.resources) && s.resources.length > 0;
+    return { ...s, resources: has ? s.resources : defaultResourcesForStep(s?.label).slice(0, 3) };
+  });
+
+  return { ...planObj, steps: nextSteps };
+}
+
+function hydratePlansArray(plans) {
+  if (!Array.isArray(plans)) return [];
+  return plans.map((p) => ensureResourcesOnSteps(p));
+}
+
+function hydrateMessagesArray(msgs) {
+  if (!Array.isArray(msgs)) return [];
+  return msgs.map((m) => {
+    if (m?.type === "plan" && m?.plan) {
+      return { ...m, plan: ensureResourcesOnSteps(m.plan) };
+    }
+    return m;
+  });
 }
 
 // ---------- Mermaid helpers ----------
 function safeMermaidLabel(s) {
-  // Prevent breaking Mermaid node syntax: remove quotes + newlines, trim, limit length
   return String(s || "")
     .replace(/"/g, "'")
     .replace(/\r?\n/g, " ")
@@ -190,18 +205,14 @@ function extractPlanFromText(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
 
-  // Capture lines like "1. something", "2) something", "- something" (fallback)
   const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
 
   const numbered = [];
   for (const l of lines) {
     const m = l.match(/^(\d+)[\.\)]\s+(.*)$/);
-    if (m && m[2]) {
-      numbered.push(m[2].trim());
-    }
+    if (m && m[2]) numbered.push(m[2].trim());
   }
 
-  // If no numbered list, try bullet list
   if (numbered.length === 0) {
     const bullets = lines
       .filter((l) => /^[-•]\s+/.test(l))
@@ -211,7 +222,6 @@ function extractPlanFromText(text) {
     return null;
   }
 
-  // Drop weird empty markdown like "**" or ""
   const cleaned = numbered
     .map((s) => s.replace(/^\*\*+|\*\*+$/g, "").trim())
     .filter((s) => s && s !== "**");
@@ -240,7 +250,7 @@ function MermaidDiagram({ code }) {
         const id = `mmd-${Math.random().toString(16).slice(2)}`;
         const { svg } = await mermaid.render(id, src);
         if (!cancelled && ref.current) ref.current.innerHTML = svg;
-      } catch (e) {
+      } catch {
         if (!cancelled && ref.current) {
           ref.current.innerHTML = "<div style='opacity:.8'>Diagram failed to render.</div>";
         }
@@ -283,9 +293,6 @@ function getAxiosErrorMessage(err) {
   return "Network or server error.";
 }
 
-/**
- * Map your UI "need" to backend topics.
- */
 function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
   if (needKey === "interview") return "interview_confidence";
   if (needKey === "presentation") return "presentation_confidence";
@@ -303,10 +310,6 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
   return "general";
 }
 
-/**
- * Convert backend plan -> UI plan object (robust)
- * Supports tasks OR steps OR items, and string steps.
- */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
   const raw =
     (Array.isArray(plan?.tasks) && plan.tasks) ||
@@ -316,13 +319,20 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
 
   const norm = raw.map((t) => {
     if (typeof t === "string") return { text: t, resources: [] };
+    // ✅ accept alternative fields from backend too
+    const resources =
+      (Array.isArray(t?.resources) && t.resources) ||
+      (Array.isArray(t?.links) && t.links) ||
+      (Array.isArray(t?.learning_links) && t.learning_links) ||
+      [];
+
     return {
       text: t?.text ?? t?.label ?? t?.task ?? "",
-      resources: Array.isArray(t?.resources) ? t.resources : [],
+      resources,
     };
   });
 
-  return {
+  const ui = {
     id: plan?.id || uid("plan"),
     title: plan?.title || `${titleCase(focus)} • ${needLabel || "Plan"}`,
     goal: plan?.goal || "",
@@ -333,13 +343,15 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
       .map((t, i) => ({
         id: `S${i + 1}`,
         label: String(t?.text || "").trim(),
-        resources: t.resources,
+        resources: Array.isArray(t?.resources) ? t.resources : [],
       }))
-      .filter((s) => s.label) // drop empty items
+      .filter((s) => s.label)
       .slice(0, 12),
     createdAt: plan?.created_at || new Date().toISOString(),
     acceptedAt: null,
   };
+
+  return ensureResourcesOnSteps(ui);
 }
 
 // ---------- Inline sidebar (shows links too) ----------
@@ -365,7 +377,7 @@ function ConversationPlansSidebarInline({ plans }) {
     },
   };
 
-  const safePlans = Array.isArray(plans) ? plans : [];
+  const safePlans = hydratePlansArray(plans);
 
   return (
     <div>
@@ -391,7 +403,6 @@ function ConversationPlansSidebarInline({ plans }) {
                   <li key={s.id} style={styles.step}>
                     <div>{s.label}</div>
 
-                    {/* ✅ Show links in sidebar too */}
                     {Array.isArray(s.resources) && s.resources.length > 0 ? (
                       <ul style={styles.links}>
                         {s.resources.slice(0, 2).map((r, idx) => (
@@ -403,7 +414,9 @@ function ConversationPlansSidebarInline({ plans }) {
                           </li>
                         ))}
                       </ul>
-                    ) : null}
+                    ) : (
+                      <div style={styles.muted}>No links found.</div>
+                    )}
                   </li>
                 ))}
               </ol>
@@ -429,16 +442,11 @@ export default function Chat() {
   const userAvatar = avatarMap[userAvatarKey];
 
   const coachId = profile?.coachId || "mira";
-  const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || {
-    name: "Coach",
-    avatar: userAvatar?.img,
-  };
+  const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || { name: "Coach", avatar: userAvatar?.img };
 
-  // Recommend stable userId (email if you have it)
   const userId = profile?.user_id || profile?.email || "local-dev";
   const focus = profile?.focus || "work";
 
-  // need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
@@ -463,32 +471,21 @@ export default function Chat() {
     return "interview";
   });
 
-  const [customNeedLabel, setCustomNeedLabel] = useState(() => {
-    const saved = loadSaved(customNeedLabelStorage, "");
-    return String(saved || "");
-  });
+  const [customNeedLabel, setCustomNeedLabel] = useState(() => String(loadSaved(customNeedLabelStorage, "") || ""));
 
   function currentNeedLabel() {
     const found = NEED_OPTIONS.find((x) => x.key === needKey);
-    if (needKey === "custom") {
-      return customNeedLabel?.trim() ? titleCase(customNeedLabel.trim()) : "Custom confidence";
-    }
+    if (needKey === "custom") return customNeedLabel?.trim() ? titleCase(customNeedLabel.trim()) : "Custom confidence";
     return found?.label || "Confidence";
   }
 
   const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
 
-  // per-need chat storage
   const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
-  // persistent across app
   const plansKey = `bc_plans_${userId}`;
-  // conversation plans (sessionStorage)
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
-  // confidence per focus + need
   const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
-  // UI state across navigation
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
-  // pending plan request (prevents “two questions at once”)
   const pendingKey = `${uiKey}_pendingPlanRequest`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
@@ -497,8 +494,6 @@ export default function Chat() {
   const [input, setInput] = useState(() => loadSession(`${uiKey}_draft`, ""));
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  // Prevent double-send
   const sendingRef = useRef(false);
 
   const [plans, setPlans] = useState([]);
@@ -508,13 +503,11 @@ export default function Chat() {
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
   const [chatHydrated, setChatHydrated] = useState(false);
 
-  // confidence UX
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
   const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() => loadSession(`${uiKey}_awaitBaselineReason`, false));
   const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() => loadSession(`${uiKey}_awaitDailyProgress`, false));
   const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() => loadSession(`${uiKey}_awaitDailyConfidence`, false));
 
-  // backend ui
   const [backendUI, setBackendUI] = useState(() =>
     loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null })
   );
@@ -522,55 +515,53 @@ export default function Chat() {
   const listRef = useRef(null);
   const reqSeqRef = useRef(0);
 
-  // Load per-need chat messages
+  // ✅ Load + hydrate per-need chat messages (so old plans now show links)
   useEffect(() => {
     setChatHydrated(false);
-    setMessages(loadSaved(chatKey, []));
+    const loaded = loadSaved(chatKey, []);
+    const hydrated = hydrateMessagesArray(loaded);
+    setMessages(hydrated);
+    // Save back once (migration)
+    save(chatKey, hydrated);
     setChatHydrated(true);
   }, [chatKey]);
 
-  // Load global plans
+  // ✅ Load + hydrate global plans (migration)
   useEffect(() => {
     const p = loadSaved(plansKey, []);
-    setPlans(Array.isArray(p) ? p : []);
+    const hydrated = hydratePlansArray(p);
+    setPlans(hydrated);
+    save(plansKey, hydrated);
     setPlansHydrated(true);
   }, [plansKey]);
 
-  // Load conversation plans
+  // ✅ Load + hydrate conversation plans (migration)
   useEffect(() => {
     const savedConv = loadSession(convPlansKey, []);
-    setConvPlans(Array.isArray(savedConv) ? savedConv : []);
+    const hydrated = hydratePlansArray(savedConv);
+    setConvPlans(hydrated);
+    saveSession(convPlansKey, hydrated);
     setConvPlansHydrated(true);
   }, [convPlansKey]);
 
-  // Persist chat
   useEffect(() => {
     save(chatKey, messages);
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, chatKey]);
 
-  // Persist global plans
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
   }, [plansKey, plans, plansHydrated]);
 
-  // Persist conversation plans
   useEffect(() => {
     if (!convPlansHydrated) return;
     saveSession(convPlansKey, convPlans);
   }, [convPlansKey, convPlans, convPlansHydrated]);
 
-  // Persist need selection
-  useEffect(() => {
-    save(needKeyStorage, needKey);
-  }, [needKeyStorage, needKey]);
+  useEffect(() => save(needKeyStorage, needKey), [needKeyStorage, needKey]);
+  useEffect(() => save(customNeedLabelStorage, customNeedLabel), [customNeedLabelStorage, customNeedLabel]);
 
-  useEffect(() => {
-    save(customNeedLabelStorage, customNeedLabel);
-  }, [customNeedLabelStorage, customNeedLabel]);
-
-  // Persist UI state
   useEffect(() => saveSession(`${uiKey}_draft`, input), [uiKey, input]);
   useEffect(() => saveSession(`${uiKey}_hasSpoken`, hasUserSpoken), [uiKey, hasUserSpoken]);
   useEffect(() => saveSession(`${uiKey}_readyBaseline`, readyForBaseline), [uiKey, readyForBaseline]);
@@ -580,7 +571,6 @@ export default function Chat() {
   useEffect(() => saveSession(`${uiKey}_awaitDailyConfidence`, awaitingDailyConfidence), [uiKey, awaitingDailyConfidence]);
   useEffect(() => saveSession(`${uiKey}_backendUI`, backendUI), [uiKey, backendUI]);
 
-  // Reset local UX gating when need changes
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
@@ -603,7 +593,6 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
-  // Baseline + daily triggers (only after user talked + requested plan)
   useEffect(() => {
     if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
@@ -659,7 +648,7 @@ export default function Chat() {
   }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
 
   const acceptPlan = (planObj) => {
-    const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
+    const accepted = { ...ensureResourcesOnSteps(planObj), acceptedAt: new Date().toISOString() };
     save(activeNeedStorage, accepted?.needKey || needKey);
 
     setPlans((prev) => {
@@ -674,16 +663,13 @@ export default function Chat() {
 
     setMessages((prev) =>
       prev.map((m) => {
-        if (m.type === "plan" && m.plan?.id === planObj.id) return { ...m, accepted: true };
+        if (m.type === "plan" && m.plan?.id === planObj.id) return { ...m, accepted: true, plan: accepted };
         if (m.type === "plan_accept" && m.planId === planObj.id) return { ...m, accepted: true };
         return m;
       })
     );
 
-    setMessages((prev) => [
-      ...prev,
-      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." },
-    ]);
+    setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." }]);
   };
 
   const revisePlan = async () => {
@@ -739,7 +725,6 @@ export default function Chat() {
       };
       setBackendUI(uiState);
 
-      // Text messages from backend
       const backendMessages = Array.isArray(data.messages) ? data.messages : [];
       let lastAssistantText = "";
 
@@ -747,18 +732,13 @@ export default function Chat() {
         const texts = backendMessages.map((m) => String(m?.text || "").trim()).filter(Boolean);
         lastAssistantText = texts.length ? texts[texts.length - 1] : "";
 
-        setMessages((prev) => [
-          ...prev,
-          ...texts.map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text })),
-        ]);
+        setMessages((prev) => [...prev, ...texts.map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text }))]);
       }
 
-      // Plan card when backend returns structured plan
       if (data.plan && typeof data.plan === "object") {
-        let planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
-        planObj = ensureResourcesOnSteps(planObj);
-
+        const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
         const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
+
         const mermaidCode =
           uiState.mermaid && String(uiState.mermaid).trim()
             ? String(uiState.mermaid)
@@ -768,46 +748,36 @@ export default function Chat() {
         return;
       }
 
-      // ✅ Fallback: if backend only returned numbered steps text, create a plan anyway
+      // Fallback: create plan if assistant text contains numbered steps
       if (lastAssistantText) {
         const extracted = extractPlanFromText(lastAssistantText);
         if (extracted?.steps?.length) {
-          let planObj = {
+          const planObj = ensureResourcesOnSteps({
             id: uid("plan"),
             title: `${currentNeedLabel()} Plan`,
             goal: "",
             focus,
             needKey,
             needLabel: currentNeedLabel(),
-            steps: extracted.steps.map((label, i) => ({
-              id: `S${i + 1}`,
-              label: String(label || "").trim(),
-              resources: defaultResourcesForStep(label).slice(0, 3),
-            })),
+            steps: extracted.steps.map((label, i) => ({ id: `S${i + 1}`, label: String(label || "").trim(), resources: [] })),
             createdAt: new Date().toISOString(),
             acceptedAt: null,
-          };
+          });
 
-          planObj = ensureResourcesOnSteps(planObj);
           const mermaidCode = buildFallbackMermaidFromSteps(planObj.title, extracted.steps);
-
           addPlanCardToChat(planObj, mermaidCode);
         }
       }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
-      // One silent retry
       if (!didRetry) {
         await new Promise((r) => setTimeout(r, 800));
         return callCoachBackend(outboundText, true);
       }
 
       const msg = getAxiosErrorMessage(err);
-      const finalText =
-        msg === "Request timed out."
-          ? "Sorry — the coach is taking too long. Please try sending again."
-          : "Sorry — I couldn’t reach the coach just now. Please try again.";
+      const finalText = msg === "Request timed out." ? "Sorry — the coach is taking too long. Please try sending again." : "Sorry — I couldn’t reach the coach just now. Please try again.";
 
       setMessages((prev) => {
         if (alreadyHasRecentReachError(prev) && finalText.includes("couldn’t reach the coach")) return prev;
@@ -819,14 +789,8 @@ export default function Chat() {
   async function syncBaselineToBackend(level) {
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
     try {
-      await axios.post(
-        `${API_BASE}/chat`,
-        { user_id: userId, message: String(level), coach: coachId, profile, topic },
-        { timeout: AXIOS_TIMEOUT_MS }
-      );
-    } catch {
-      // ignore
-    }
+      await axios.post(`${API_BASE}/chat`, { user_id: userId, message: String(level), coach: coachId, profile, topic }, { timeout: AXIOS_TIMEOUT_MS });
+    } catch {}
   }
 
   function saveConfidence(level) {
@@ -856,7 +820,6 @@ export default function Chat() {
     const nLabel = currentNeedLabel();
 
     setAwaitingDailyProgress(false);
-
     setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" }]);
 
     if (didProgress) {
@@ -875,9 +838,7 @@ export default function Chat() {
     setLoading(true);
     sendingRef.current = true;
     try {
-      await callCoachBackend(
-        `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`
-      );
+      await callCoachBackend(`I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`);
     } finally {
       setLoading(false);
       sendingRef.current = false;
@@ -913,7 +874,6 @@ export default function Chat() {
     const nLabel = currentNeedLabel();
 
     try {
-      // If user asked for a plan and we don't have baseline yet -> store request and ask baseline first
       const conf = loadSaved(confidenceKey, null);
       const hasBaseline = conf && typeof conf?.baseline === "number";
 
@@ -934,7 +894,6 @@ export default function Chat() {
 
       if (awaitingBaselineReason) {
         setAwaitingBaselineReason(false);
-
         const pending = loadSession(pendingKey, null);
         saveSession(pendingKey, null);
 
@@ -950,10 +909,7 @@ export default function Chat() {
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
-          setMessages((prev) => [
-            ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
-          ]);
+          setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." }]);
           return;
         }
 
@@ -979,10 +935,7 @@ export default function Chat() {
       if (awaitingDailyConfidence) {
         const level = parseConfidence(userText);
         if (level == null) {
-          setMessages((prev) => [
-            ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
-          ]);
+          setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." }]);
           return;
         }
 
@@ -1000,7 +953,6 @@ export default function Chat() {
     }
   };
 
-  // Clear chat ALSO clears "Plans from this conversation"
   const clearChat = () => {
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);
@@ -1047,58 +999,17 @@ export default function Chat() {
     muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
     bubbleUser: { background: "var(--bg-chat-user, #111827)", color: "#fff", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
     bubbleCoach: { background: "var(--bg-chat-coach, #f3f4f6)", color: "#111827", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
-    btn: {
-      height: 36,
-      borderRadius: 10,
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      background: "#fff",
-      color: "#111827",
-      padding: "0 12px",
-      cursor: "pointer",
-    },
-    primaryBtn: {
-      height: 36,
-      borderRadius: 10,
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      background: "#111827",
-      color: "#fff",
-      padding: "0 12px",
-      cursor: "pointer",
-    },
+    btn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#fff", color: "#111827", padding: "0 12px", cursor: "pointer" },
+    primaryBtn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 12px", cursor: "pointer" },
     card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "#fff" },
-    badge: {
-      display: "inline-block",
-      fontSize: 12,
-      padding: "2px 8px",
-      borderRadius: 999,
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      opacity: 0.9,
-      marginLeft: 8,
-    },
-    sendBtn: {
-      marginTop: 8,
-      height: 42,
-      borderRadius: 10,
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      background: "#111827",
-      color: "#fff",
-      padding: "0 14px",
-      cursor: "pointer",
-      opacity: loading ? 0.7 : 1,
-    },
+    badge: { display: "inline-block", fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid var(--border-soft, #e5e7eb)", opacity: 0.9, marginLeft: 8 },
+    sendBtn: { marginTop: 8, height: 42, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 14px", cursor: "pointer", opacity: loading ? 0.7 : 1 },
     hint: { fontSize: 12, marginTop: 6, opacity: 0.85, color: "var(--text-muted, #6b7280)" },
     resources: { marginTop: 6, fontSize: 13, opacity: 0.92 },
     linkList: { margin: "6px 0 0", paddingLeft: 18 },
     progressBtns: { display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" },
     needRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-    select: {
-      height: 36,
-      borderRadius: 10,
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      padding: "0 10px",
-      background: "#fff",
-      color: "#111827",
-    },
+    select: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827" },
     smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827", minWidth: 220 },
   };
 
@@ -1135,7 +1046,6 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* Need selector */}
       <div style={{ marginTop: 12, ...styles.card }}>
         <div style={styles.needRow}>
           <div style={{ fontWeight: 800 }}>What confidence area are we working on?</div>
@@ -1150,13 +1060,7 @@ export default function Chat() {
 
           {needKey === "custom" && (
             <>
-              <input
-                value={customNeedLabel}
-                onChange={(e) => setCustomNeedLabel(e.target.value)}
-                placeholder='Name it (e.g., "Executive presence")'
-                style={styles.smallInput}
-                disabled={loading}
-              />
+              <input value={customNeedLabel} onChange={(e) => setCustomNeedLabel(e.target.value)} placeholder='Name it (e.g., "Executive presence")' style={styles.smallInput} disabled={loading} />
               <span style={styles.muted}>Each custom name gets its own confidence baseline.</span>
             </>
           )}
@@ -1170,7 +1074,6 @@ export default function Chat() {
       </div>
 
       <div className="chat-layout" style={styles.layout}>
-        {/* LEFT: Chat */}
         <div>
           <div ref={listRef} style={styles.panel}>
             {messages.length === 0 && <div style={styles.muted}>Say what’s on your mind — I’ll respond like a real conversation.</div>}
@@ -1326,7 +1229,6 @@ export default function Chat() {
           </button>
         </div>
 
-        {/* RIGHT: Plans from this conversation (with links) */}
         <div className="conv-sidebar" style={styles.sidePanel}>
           <ConversationPlansSidebarInline plans={convPlans} />
         </div>
