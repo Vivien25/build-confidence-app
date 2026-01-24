@@ -1,11 +1,10 @@
 // frontend/src/pages/Chat.jsx
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import mermaid from "mermaid";
 import { getProfile } from "../utils/profile";
 import { avatarMap, COACHES } from "../utils/avatars";
 import { useNavigate } from "react-router-dom";
-import ConversationPlansSidebar from "../components/ConversationPlansSidebar";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const AXIOS_TIMEOUT_MS = Number(import.meta.env.VITE_CHAT_TIMEOUT_MS || 20000);
@@ -93,6 +92,23 @@ function userAskedForPlan(text) {
   return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule)\b/.test(t);
 }
 
+// ✅ Mermaid-safe short labels (prevents diagram failures)
+function mermaidSafeLabel(text, maxLen = 32) {
+  return (
+    String(text || "")
+      .replace(/["']/g, "") // remove quotes
+      .replace(/[^\w\s-]/g, "") // remove special chars
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, maxLen) || "Step"
+  );
+}
+
+function hasBaseline(confidenceKey) {
+  const conf = loadSaved(confidenceKey, null);
+  return conf && typeof conf?.baseline === "number";
+}
+
 // ---------- Mermaid component ----------
 function MermaidDiagram({ code }) {
   const ref = useRef(null);
@@ -115,7 +131,9 @@ function MermaidDiagram({ code }) {
         if (!cancelled && ref.current) ref.current.innerHTML = svg;
       } catch {
         if (!cancelled && ref.current) {
-          ref.current.innerHTML = "<div style='opacity:.8'>Diagram failed to render.</div>";
+          // ✅ friendlier fallback (and avoids scary wording)
+          ref.current.innerHTML =
+            "<div style='opacity:.8;font-size:13px'>Diagram unavailable — steps below show the plan.</div>";
         }
       }
     };
@@ -177,7 +195,7 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
 }
 
 /**
- * ✅ UPDATED: Convert backend plan -> UI plan object (more robust)
+ * ✅ Convert backend plan -> UI plan object (robust)
  * Supports tasks OR steps OR items, and string steps.
  */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
@@ -215,6 +233,38 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
   };
 }
 
+// ✅ Inline sidebar (since you said you don't have ConversationPlansSidebar.jsx)
+function ConversationPlansSidebarInline({ plans = [], onClear }) {
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <div style={{ fontWeight: 900 }}>Plans from this conversation</div>
+        <button onClick={onClear} style={{ height: 32, borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff", cursor: "pointer" }}>
+          Clear
+        </button>
+      </div>
+
+      {(!Array.isArray(plans) || plans.length === 0) ? (
+        <div style={{ opacity: 0.75, marginTop: 10 }}>No saved plans yet. Accept a plan to pin it here.</div>
+      ) : (
+        <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+          {plans.map((p) => (
+            <div key={p.id} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10, background: "#fff" }}>
+              <div style={{ fontWeight: 800 }}>{p.title || "Plan"}</div>
+              {p.needLabel ? <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>{p.needLabel}</div> : null}
+              {Array.isArray(p.steps) && p.steps.length ? (
+                <div style={{ fontSize: 12, opacity: 0.85, marginTop: 8 }}>
+                  {p.steps.slice(0, 2).map((s) => `• ${s.label}`).join("\n")}
+                </div>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Chat() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getProfile() || {});
@@ -232,11 +282,11 @@ export default function Chat() {
     avatar: userAvatar?.img,
   };
 
-  // ✅ Recommend stable userId (email if you have it)
+  // ✅ stable userId
   const userId = profile?.user_id || profile?.email || "local-dev";
   const focus = profile?.focus || "work";
 
-  // ✅ need selection (localStorage)
+  // need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
@@ -550,21 +600,24 @@ export default function Chat() {
       if (data.plan && typeof data.plan === "object") {
         const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
 
+        // ✅ Mermaid: use backend mermaid if valid, otherwise safe fallback
         const mermaidCode =
           uiState.mermaid && String(uiState.mermaid).trim()
             ? String(uiState.mermaid)
             : (() => {
-                const safe = (t) => String(t || "").replace(/"/g, '\\"');
                 const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
-                if (!steps.length) return `flowchart TD\nA["${safe(planObj.title || "Plan")}"]`;
-                const first = steps?.[0]?.id || "S1";
-                const nodes = steps.map((s) => `${s.id}["${safe(s.label)}"]`).join("\n");
+                const title = mermaidSafeLabel(planObj.title || "Plan", 40);
+
+                if (!steps.length) return `flowchart TD\nA["${title}"]`;
+
+                const nodes = steps.map((s) => `${s.id}["${mermaidSafeLabel(s.label)}"]`).join("\n");
                 const edges = steps
                   .slice(0, -1)
                   .map((_, i) => `${steps[i].id} --> ${steps[i + 1].id}`)
                   .join("\n");
+
                 return `flowchart TD
-A["${safe(planObj.title || "Plan")}"] --> ${first}
+A["${title}"] --> ${steps[0].id}
 ${nodes}
 ${edges}
 `;
@@ -683,8 +736,35 @@ ${edges}
     setLoading(true);
 
     if (!isGreeting(userText)) setHasUserSpoken(true);
-    if (!readyForBaseline && userAskedForPlan(userText)) setReadyForBaseline(true);
 
+    // ✅ Issue #1 fix: stop backend from replying when we are about to ask baseline.
+    // If user asks for plan and baseline missing, ask ONLY baseline and RETURN.
+    if (userAskedForPlan(userText) && !hasBaseline(confidenceKey) && !awaitingBaseline && !awaitingBaselineReason) {
+      setReadyForBaseline(true);
+      setAwaitingBaseline(true);
+
+      const fLabel = focusLabel(focus);
+      const nLabel = currentNeedLabel();
+
+      setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text" }]);
+
+      upsertSystemMessage(setMessages, {
+        id: `system_baseline_${focus}_${needSlug}`,
+        role: "assistant",
+        type: "system",
+        kind: "baseline_prompt",
+        mode: "coach",
+        message:
+          `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\n` +
+          `On a scale from 1–10, what is your confidence level right now?`,
+      });
+
+      setLoading(false);
+      sendingRef.current = false;
+      return;
+    }
+
+    // normal path: append user message
     setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text" }]);
 
     const fLabel = focusLabel(focus);
@@ -752,11 +832,20 @@ ${edges}
     }
   };
 
-  // ✅ UPDATED: clear chat ALSO clears "Plans from this conversation"
+  // ✅ Issue #3 fix: clear chat ALSO clears "Plans from this conversation"
   const clearChat = () => {
+    const ok = window.confirm("Clear this chat AND the plans from this conversation?");
+    if (!ok) return;
+
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);
     setMessages([]);
+    setConvPlans([]);
+    setBackendUI({ mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null });
+  };
+
+  const clearConversationPlansOnly = () => {
+    sessionStorage.removeItem(convPlansKey);
     setConvPlans([]);
   };
 
@@ -1077,9 +1166,9 @@ ${edges}
           </button>
         </div>
 
-        {/* RIGHT: Plans from this conversation */}
+        {/* RIGHT: Plans from this conversation (inline) */}
         <div className="conv-sidebar" style={styles.sidePanel}>
-          <ConversationPlansSidebar plans={convPlans} focus={focus} />
+          <ConversationPlansSidebarInline plans={convPlans} onClear={clearConversationPlansOnly} />
         </div>
       </div>
     </div>
