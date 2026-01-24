@@ -51,7 +51,9 @@ function uid(prefix = "id") {
 
 function todayStr() {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
 }
 
 function parseConfidence(input) {
@@ -89,62 +91,21 @@ function isGreeting(text) {
 
 function userAskedForPlan(text) {
   const t = String(text || "").toLowerCase();
-  return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule)\b/.test(t);
+  return /\b(plan|steps|roadmap|action items|what should i do|next steps|strategy|schedule)\b/.test(
+    t
+  );
 }
 
-// ✅ Mermaid-safe short labels (prevents diagram failures)
-function mermaidSafeLabel(text, maxLen = 32) {
+// ✅ Mermaid-safe labels (prevents diagram failures)
+function mermaidSafeLabel(text, maxLen = 40) {
   return (
     String(text || "")
-      .replace(/["']/g, "") // remove quotes
-      .replace(/[^\w\s-]/g, "") // remove special chars
+      .replace(/["']/g, "")
+      .replace(/[^\w\s-]/g, "")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, maxLen) || "Step"
   );
-}
-
-function hasBaseline(confidenceKey) {
-  const conf = loadSaved(confidenceKey, null);
-  return conf && typeof conf?.baseline === "number";
-}
-
-// ---------- Mermaid component ----------
-function MermaidDiagram({ code }) {
-  const ref = useRef(null);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async () => {
-      try {
-        if (!ref.current) return;
-
-        const src = String(code || "").trim();
-        if (!src) {
-          ref.current.innerHTML = "<div style='opacity:.8'>No diagram.</div>";
-          return;
-        }
-
-        const id = `mmd-${Math.random().toString(16).slice(2)}`;
-        const { svg } = await mermaid.render(id, src);
-        if (!cancelled && ref.current) ref.current.innerHTML = svg;
-      } catch {
-        if (!cancelled && ref.current) {
-          // ✅ friendlier fallback (and avoids scary wording)
-          ref.current.innerHTML =
-            "<div style='opacity:.8;font-size:13px'>Diagram unavailable — steps below show the plan.</div>";
-        }
-      }
-    };
-
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [code]);
-
-  return <div ref={ref} />;
 }
 
 // ✅ Replace/update system messages instead of appending stale ones
@@ -196,7 +157,6 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
 
 /**
  * ✅ Convert backend plan -> UI plan object (robust)
- * Supports tasks OR steps OR items, and string steps.
  */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
   const raw =
@@ -226,34 +186,111 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
         label: String(t?.text || "").trim(),
         resources: t.resources,
       }))
-      .filter((s) => s.label) // ✅ drop empty items (prevents "1. **")
+      .filter((s) => s.label)
       .slice(0, 12),
     createdAt: plan?.created_at || new Date().toISOString(),
     acceptedAt: null,
   };
 }
 
-// ✅ Inline sidebar (since you said you don't have ConversationPlansSidebar.jsx)
+/**
+ * ✅ NEW: If backend returns only text, try to extract a numbered plan:
+ * 1. ...
+ * 2. ...
+ */
+function extractPlanFromText(text) {
+  const s = String(text || "");
+  const lines = s.split("\n").map((x) => x.trim());
+  const steps = [];
+
+  for (const line of lines) {
+    const m = line.match(/^(\d+)[.)]\s+(.*)$/);
+    if (m) {
+      const label = m[2].trim();
+      if (label) steps.push(label);
+    }
+  }
+  if (steps.length < 2) return null; // require at least 2 steps to treat it as a plan
+  return {
+    title: "Plan",
+    goal: "",
+    steps: steps.slice(0, 12),
+  };
+}
+
+// ---------- Mermaid component ----------
+function MermaidDiagram({ code }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      try {
+        if (!ref.current) return;
+
+        const src = String(code || "").trim();
+        if (!src) {
+          ref.current.innerHTML =
+            "<div style='opacity:.8;font-size:13px'>Diagram unavailable — steps below show the plan.</div>";
+          return;
+        }
+
+        const id = `mmd-${Math.random().toString(16).slice(2)}`;
+        const { svg } = await mermaid.render(id, src);
+        if (!cancelled && ref.current) ref.current.innerHTML = svg;
+      } catch {
+        if (!cancelled && ref.current) {
+          ref.current.innerHTML =
+            "<div style='opacity:.8;font-size:13px'>Diagram unavailable — steps below show the plan.</div>";
+        }
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [code]);
+
+  return <div ref={ref} />;
+}
+
+// ✅ Inline sidebar (no ConversationPlansSidebar.jsx needed)
 function ConversationPlansSidebarInline({ plans = [], onClear }) {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <div style={{ fontWeight: 900 }}>Plans from this conversation</div>
-        <button onClick={onClear} style={{ height: 32, borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff", cursor: "pointer" }}>
+        <button
+          onClick={onClear}
+          style={{
+            height: 32,
+            borderRadius: 10,
+            border: "1px solid #e5e7eb",
+            background: "#fff",
+            cursor: "pointer",
+          }}
+        >
           Clear
         </button>
       </div>
 
-      {(!Array.isArray(plans) || plans.length === 0) ? (
-        <div style={{ opacity: 0.75, marginTop: 10 }}>No saved plans yet. Accept a plan to pin it here.</div>
+      {!Array.isArray(plans) || plans.length === 0 ? (
+        <div style={{ opacity: 0.75, marginTop: 10 }}>
+          No saved plans yet. Accept a plan to pin it here.
+        </div>
       ) : (
         <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
           {plans.map((p) => (
-            <div key={p.id} style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10, background: "#fff" }}>
+            <div
+              key={p.id}
+              style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 10, background: "#fff" }}
+            >
               <div style={{ fontWeight: 800 }}>{p.title || "Plan"}</div>
               {p.needLabel ? <div style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>{p.needLabel}</div> : null}
               {Array.isArray(p.steps) && p.steps.length ? (
-                <div style={{ fontSize: 12, opacity: 0.85, marginTop: 8 }}>
+                <div style={{ fontSize: 12, opacity: 0.85, marginTop: 8, whiteSpace: "pre-wrap" }}>
                   {p.steps.slice(0, 2).map((s) => `• ${s.label}`).join("\n")}
                 </div>
               ) : null}
@@ -282,11 +319,9 @@ export default function Chat() {
     avatar: userAvatar?.img,
   };
 
-  // ✅ stable userId
   const userId = profile?.user_id || profile?.email || "local-dev";
   const focus = profile?.focus || "work";
 
-  // need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
@@ -326,15 +361,10 @@ export default function Chat() {
 
   const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
 
-  // per-need chat storage
   const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
-  // persistent across app
   const plansKey = `bc_plans_${userId}`;
-  // conversation plans (sessionStorage)
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
-  // confidence per focus + need
   const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
-  // UI state across navigation
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
@@ -344,7 +374,6 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // Prevent double-send
   const sendingRef = useRef(false);
 
   const [plans, setPlans] = useState([]);
@@ -354,17 +383,17 @@ export default function Chat() {
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
   const [chatHydrated, setChatHydrated] = useState(false);
 
-  // confidence UX
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
   const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() =>
     loadSession(`${uiKey}_awaitBaselineReason`, false)
   );
-  const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() => loadSession(`${uiKey}_awaitDailyProgress`, false));
+  const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() =>
+    loadSession(`${uiKey}_awaitDailyProgress`, false)
+  );
   const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() =>
     loadSession(`${uiKey}_awaitDailyConfidence`, false)
   );
 
-  // backend ui
   const [backendUI, setBackendUI] = useState(() =>
     loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null })
   );
@@ -536,7 +565,13 @@ export default function Chat() {
 
     setMessages((prev) => [
       ...prev,
-      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." },
+      {
+        id: uid("msg"),
+        role: "assistant",
+        type: "text",
+        mode: "coach",
+        message: "Saved ✅ Added to this conversation and your All Plans page.",
+      },
     ]);
   };
 
@@ -560,6 +595,51 @@ export default function Chat() {
     return last?.role === "assistant" && last?.type === "text" && txt.includes("couldn’t reach the coach");
   }
 
+  function buildFallbackMermaidFromSteps(title, steps) {
+    const safeTitle = mermaidSafeLabel(title || "Plan", 40);
+    const s = Array.isArray(steps) ? steps : [];
+    if (!s.length) return `flowchart TD\nA["${safeTitle}"]`;
+
+    const nodes = s.map((label, i) => {
+      const id = `S${i + 1}`;
+      return `${id}["${mermaidSafeLabel(label)}"]`;
+    });
+
+    const edges = s.slice(0, -1).map((_, i) => `S${i + 1} --> S${i + 2}`);
+
+    return `flowchart TD
+A["${safeTitle}"] --> S1
+${nodes.join("\n")}
+${edges.join("\n")}
+`;
+  }
+
+  // ✅ NEW: if backend didn't provide structured plan, but message contains 1./2./3. steps, create a plan card.
+  function maybeCreatePlanFromAssistantText(lastAssistantText, needLabel) {
+    const extracted = extractPlanFromText(lastAssistantText);
+    if (!extracted) return null;
+
+    const planObj = {
+      id: uid("plan"),
+      title: `${needLabel} Plan`,
+      goal: "",
+      focus,
+      needKey,
+      needLabel,
+      steps: extracted.steps.map((label, i) => ({
+        id: `S${i + 1}`,
+        label: String(label || "").trim(),
+        resources: [],
+      })),
+      createdAt: new Date().toISOString(),
+      acceptedAt: null,
+    };
+
+    const mermaidCode = buildFallbackMermaidFromSteps(planObj.title, extracted.steps);
+
+    return { planObj, mermaidCode };
+  }
+
   async function callCoachBackend(outboundText, didRetry = false) {
     const mySeq = ++reqSeqRef.current;
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
@@ -574,65 +654,103 @@ export default function Chat() {
       if (mySeq !== reqSeqRef.current) return;
 
       const data = res.data || {};
-
       const ui = data.ui || {};
+
       const uiState = {
-        mode: ui.mode || "CHAT",
+        mode: ui.mode || data.mode || "CHAT",
         show_plan_sidebar: !!ui.show_plan_sidebar,
         plan_link: ui.plan_link || null,
         mermaid: ui.mermaid || null,
       };
       setBackendUI(uiState);
 
-      // Text messages from backend
+      // 1) Add assistant text messages
       const backendMessages = Array.isArray(data.messages) ? data.messages : [];
-      if (backendMessages.length > 0) {
+      const assistantTexts = backendMessages
+        .map((m) => String(m?.text || "").trim())
+        .filter(Boolean);
+
+      if (assistantTexts.length > 0) {
         setMessages((prev) => [
           ...prev,
-          ...backendMessages
-            .map((m) => String(m?.text || "").trim())
-            .filter(Boolean)
-            .map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text })),
+          ...assistantTexts.map((text) => ({
+            id: uid("msg"),
+            role: "assistant",
+            type: "text",
+            mode: "coach",
+            message: text,
+          })),
         ]);
       }
 
-      // Plan card only when backend returns structured plan
-      if (data.plan && typeof data.plan === "object") {
-        const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
+      // 2) Structured plan can come from multiple places:
+      //    - data.plan
+      //    - ui.plan
+      //    - ui.plan_json (stringified)
+      let rawPlan = null;
 
-        // ✅ Mermaid: use backend mermaid if valid, otherwise safe fallback
+      if (data.plan && typeof data.plan === "object") rawPlan = data.plan;
+      else if (ui.plan && typeof ui.plan === "object") rawPlan = ui.plan;
+      else if (typeof ui.plan_json === "string") {
+        try {
+          rawPlan = JSON.parse(ui.plan_json);
+        } catch {
+          rawPlan = null;
+        }
+      }
+
+      // 3) If we have structured plan: render plan card + diagram
+      if (rawPlan && typeof rawPlan === "object") {
+        const planObj = adaptBackendPlanToUI(rawPlan, focus, needKey, currentNeedLabel());
+
         const mermaidCode =
           uiState.mermaid && String(uiState.mermaid).trim()
             ? String(uiState.mermaid)
-            : (() => {
-                const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
-                const title = mermaidSafeLabel(planObj.title || "Plan", 40);
-
-                if (!steps.length) return `flowchart TD\nA["${title}"]`;
-
-                const nodes = steps.map((s) => `${s.id}["${mermaidSafeLabel(s.label)}"]`).join("\n");
-                const edges = steps
-                  .slice(0, -1)
-                  .map((_, i) => `${steps[i].id} --> ${steps[i + 1].id}`)
-                  .join("\n");
-
-                return `flowchart TD
-A["${title}"] --> ${steps[0].id}
-${nodes}
-${edges}
-`;
-              })();
+            : buildFallbackMermaidFromSteps(
+                planObj.title,
+                (planObj.steps || []).map((s) => s.label)
+              );
 
         setMessages((prev) => [
           ...prev,
-          { id: uid("msg"), role: "assistant", type: "plan", mode: "coach", plan: planObj, mermaid: mermaidCode, accepted: false },
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "plan",
+            mode: "coach",
+            plan: planObj,
+            mermaid: mermaidCode,
+            accepted: false,
+          },
           { id: uid("msg"), role: "assistant", type: "plan_accept", mode: "coach", planId: planObj.id, accepted: false },
+        ]);
+
+        return;
+      }
+
+      // 4) ✅ If NO structured plan, try to auto-build plan from the last assistant text (numbered list)
+      const lastText = assistantTexts.length ? assistantTexts[assistantTexts.length - 1] : "";
+      const needLabel = currentNeedLabel();
+      const fallback = maybeCreatePlanFromAssistantText(lastText, needLabel);
+
+      if (fallback) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: uid("msg"),
+            role: "assistant",
+            type: "plan",
+            mode: "coach",
+            plan: fallback.planObj,
+            mermaid: fallback.mermaidCode,
+            accepted: false,
+          },
+          { id: uid("msg"), role: "assistant", type: "plan_accept", mode: "coach", planId: fallback.planObj.id, accepted: false },
         ]);
       }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
-      // One silent retry
       if (!didRetry) {
         await new Promise((r) => setTimeout(r, 800));
         return callCoachBackend(outboundText, true);
@@ -690,7 +808,10 @@ ${edges}
 
     setAwaitingDailyProgress(false);
 
-    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" },
+    ]);
 
     if (didProgress) {
       setAwaitingDailyConfidence(true);
@@ -717,6 +838,11 @@ ${edges}
     }
   };
 
+  function hasBaselineStored() {
+    const conf = loadSaved(confidenceKey, null);
+    return conf && typeof conf?.baseline === "number";
+  }
+
   const sendMessage = async () => {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
@@ -724,22 +850,27 @@ ${edges}
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)',
+        },
       ]);
       return;
     }
 
     sendingRef.current = true;
-
     const userText = input.trim();
     setInput("");
     setLoading(true);
 
     if (!isGreeting(userText)) setHasUserSpoken(true);
 
-    // ✅ Issue #1 fix: stop backend from replying when we are about to ask baseline.
-    // If user asks for plan and baseline missing, ask ONLY baseline and RETURN.
-    if (userAskedForPlan(userText) && !hasBaseline(confidenceKey) && !awaitingBaseline && !awaitingBaselineReason) {
+    // ✅ Prevent "two questions at once":
+    // If user asks for plan and baseline missing, ask ONLY baseline and stop.
+    if (userAskedForPlan(userText) && !hasBaselineStored() && !awaitingBaseline && !awaitingBaselineReason) {
       setReadyForBaseline(true);
       setAwaitingBaseline(true);
 
@@ -784,7 +915,13 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+            },
           ]);
           return;
         }
@@ -813,7 +950,13 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+            },
           ]);
           return;
         }
@@ -821,18 +964,25 @@ ${edges}
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
 
-        await callCoachBackend(`My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`);
+        await callCoachBackend(
+          `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`
+        );
         return;
       }
 
-      await callCoachBackend(`[Need: ${nLabel}] ${userText}`);
+      // ✅ OPTIONAL: if user is asking for a plan, nudge backend to return structured plan
+      const wantsPlan = userAskedForPlan(userText);
+      const hint = wantsPlan
+        ? "\n\n(If possible, return a structured plan object with steps, and include mermaid if available.)"
+        : "";
+
+      await callCoachBackend(`[Need: ${nLabel}] ${userText}${hint}`);
     } finally {
       setLoading(false);
       sendingRef.current = false;
     }
   };
 
-  // ✅ Issue #3 fix: clear chat ALSO clears "Plans from this conversation"
   const clearChat = () => {
     const ok = window.confirm("Clear this chat AND the plans from this conversation?");
     if (!ok) return;
@@ -885,8 +1035,22 @@ ${edges}
       color: "var(--text-primary, #111827)",
     },
     muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
-    bubbleUser: { background: "var(--bg-chat-user, #111827)", color: "#fff", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
-    bubbleCoach: { background: "var(--bg-chat-coach, #f3f4f6)", color: "#111827", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
+    bubbleUser: {
+      background: "var(--bg-chat-user, #111827)",
+      color: "#fff",
+      borderRadius: 12,
+      padding: 12,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.45,
+    },
+    bubbleCoach: {
+      background: "var(--bg-chat-coach, #f3f4f6)",
+      color: "#111827",
+      borderRadius: 12,
+      padding: 12,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.45,
+    },
     btn: {
       height: 36,
       borderRadius: 10,
@@ -939,7 +1103,15 @@ ${edges}
       background: "#fff",
       color: "#111827",
     },
-    smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827", minWidth: 220 },
+    smallInput: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "#fff",
+      color: "#111827",
+      minWidth: 220,
+    },
   };
 
   const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
@@ -953,12 +1125,22 @@ ${edges}
 
   return (
     <div style={styles.page}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+        }}
+      >
         <div>
           <h2 style={{ margin: 0 }}>Better Me</h2>
           <div style={{ ...styles.muted, marginTop: 6 }}>
             Focus: <b>{focusLabel(focus)}</b> • Need: <b>{needLabel}</b>
-            {backendUI?.mode ? <span style={styles.badge}>{String(backendUI.mode).toUpperCase()}</span> : null}
+            {backendUI?.mode ? (
+              <span style={styles.badge}>{String(backendUI.mode).toUpperCase()}</span>
+            ) : null}
           </div>
         </div>
 
@@ -980,7 +1162,12 @@ ${edges}
         <div style={styles.needRow}>
           <div style={{ fontWeight: 800 }}>What confidence area are we working on?</div>
 
-          <select value={needKey} onChange={(e) => setNeedKey(e.target.value)} style={styles.select} disabled={loading}>
+          <select
+            value={needKey}
+            onChange={(e) => setNeedKey(e.target.value)}
+            style={styles.select}
+            disabled={loading}
+          >
             {NEED_OPTIONS.map((n) => (
               <option key={n.key} value={n.key}>
                 {n.label}
@@ -1013,7 +1200,11 @@ ${edges}
         {/* LEFT: Chat */}
         <div>
           <div ref={listRef} style={styles.panel}>
-            {messages.length === 0 && <div style={styles.muted}>Say what’s on your mind — I’ll respond like a real conversation.</div>}
+            {messages.length === 0 && (
+              <div style={styles.muted}>
+                Say what’s on your mind — I’ll respond like a real conversation.
+              </div>
+            )}
 
             {messages.map((m, i) => {
               const isUser = m.role === "user";
@@ -1021,8 +1212,17 @@ ${edges}
               const name = isUser ? "You" : coach.name;
 
               return (
-                <div key={m.id || i} style={{ display: "flex", alignItems: "flex-start", marginBottom: 12 }}>
-                  <img src={avatarImg} alt={name} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
+                <div
+                  key={m.id || i}
+                  style={{ display: "flex", alignItems: "flex-start", marginBottom: 12 }}
+                >
+                  <img
+                    src={avatarImg}
+                    alt={name}
+                    width={36}
+                    height={36}
+                    style={{ borderRadius: "50%", marginRight: 10 }}
+                  />
 
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 700, marginBottom: 6 }}>{name}</div>
@@ -1084,7 +1284,9 @@ ${edges}
                           </div>
                         )}
 
-                        {m.accepted && <div style={{ marginTop: 10, fontWeight: 700, opacity: 0.85 }}>✅ Accepted (saved)</div>}
+                        {m.accepted && (
+                          <div style={{ marginTop: 10, fontWeight: 700, opacity: 0.85 }}>✅ Accepted (saved)</div>
+                        )}
                       </div>
                     ) : m.type === "plan_accept" && !m.accepted ? (
                       <div style={styles.bubbleCoach}>
@@ -1116,7 +1318,13 @@ ${edges}
 
             {loading && (
               <div style={{ display: "flex", alignItems: "center", opacity: 0.85, marginTop: 8 }}>
-                <img src={coach.avatar} alt={coach.name} width={36} height={36} style={{ borderRadius: "50%", marginRight: 10 }} />
+                <img
+                  src={coach.avatar}
+                  alt={coach.name}
+                  width={36}
+                  height={36}
+                  style={{ borderRadius: "50%", marginRight: 10 }}
+                />
                 <div>
                   <div style={{ fontWeight: 700 }}>{coach.name}</div>
                   <div style={styles.muted}>typing…</div>
@@ -1166,7 +1374,7 @@ ${edges}
           </button>
         </div>
 
-        {/* RIGHT: Plans from this conversation (inline) */}
+        {/* RIGHT: Plans from this conversation */}
         <div className="conv-sidebar" style={styles.sidePanel}>
           <ConversationPlansSidebarInline plans={convPlans} onClear={clearConversationPlansOnly} />
         </div>
