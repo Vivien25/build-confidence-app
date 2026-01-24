@@ -1,3 +1,4 @@
+// frontend/src/pages/Plans.jsx
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getProfile } from "../utils/profile";
@@ -19,7 +20,9 @@ function save(key, value) {
 
 function todayStr() {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
 }
 
 function uid(prefix = "id") {
@@ -38,6 +41,31 @@ function slugify(s) {
     .replace(/['"]/g, "")
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+function clearStorageByPrefix(storage, prefix) {
+  const keysToRemove = [];
+  for (let i = 0; i < storage.length; i++) {
+    const k = storage.key(i);
+    if (k && k.startsWith(prefix)) keysToRemove.push(k);
+  }
+  keysToRemove.forEach((k) => storage.removeItem(k));
+}
+
+function clearUserPlanDataEverywhere(userId) {
+  // All Plans + checkins
+  localStorage.removeItem(`bc_plans_${userId}`);
+  localStorage.removeItem(`bc_checkins_${userId}`);
+
+  // Conversation plans (sessionStorage) across ALL focuses
+  clearStorageByPrefix(sessionStorage, `bc_conv_plans_${userId}_`);
+
+  // OPTIONAL: also clear per-need chat history across ALL focuses/needs
+  // Comment out if you want to keep chat history.
+  clearStorageByPrefix(localStorage, `bc_chat_${userId}_`);
+
+  // OPTIONAL: clear active need selection used for daily check-ins
+  clearStorageByPrefix(localStorage, `bc_active_need_${userId}_`);
 }
 
 const FOCUS_OPTIONS = ["all", "work", "relationship", "appearance", "social"];
@@ -61,6 +89,7 @@ export default function Plans() {
   const [plansHydrated, setPlansHydrated] = useState(false);
   const [checkinsHydrated, setCheckinsHydrated] = useState(false);
 
+  // Hydrate
   useEffect(() => {
     const p = loadSaved(plansKey, []);
     const c = loadSaved(checkinsKey, []);
@@ -70,6 +99,7 @@ export default function Plans() {
     setCheckinsHydrated(true);
   }, [plansKey, checkinsKey]);
 
+  // Persist
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
@@ -80,6 +110,7 @@ export default function Plans() {
     save(checkinsKey, checkins);
   }, [checkinsKey, checkins, checkinsHydrated]);
 
+  // Keep in sync when user returns to this tab or another tab changes storage
   useEffect(() => {
     const refreshFromStorage = () => {
       const p = loadSaved(plansKey, []);
@@ -133,7 +164,7 @@ export default function Plans() {
   const acceptedPlans =
     filter === "all" ? acceptedPlansAll : acceptedPlansAll.filter((p) => p.focus === filter);
 
-  // ✅ NEW: build correct confidence key per plan (focus + need)
+  // Confidence key per plan (focus + need)
   function confidenceKeyForPlan(plan) {
     const focus = plan?.focus || "work";
 
@@ -175,9 +206,8 @@ export default function Plans() {
     return { key, baseline, today, latest, delta, history };
   }
 
-  // ✅ NEW: Summary by focus + need (based on accepted plans)
+  // Summary by focus + need
   const confidenceSummary = useMemo(() => {
-    // Build one summary row per (focus, needKey+needLabel)
     const map = new Map();
 
     for (const p of acceptedPlansAll) {
@@ -189,13 +219,11 @@ export default function Plans() {
       const conf = getConfidenceForPlan(p);
       const id = `${focus}__${needKey}__${needLabel}`;
 
-      // prefer a plan that actually has confidence recorded
       if (!map.has(id) || (conf && conf.latest != null)) {
         map.set(id, { focus, needKey, needLabel, conf });
       }
     }
 
-    // sort by focus then label
     return Array.from(map.values()).sort((a, b) => {
       const fa = String(a.focus);
       const fb = String(b.focus);
@@ -206,19 +234,8 @@ export default function Plans() {
   }, [acceptedPlansAll, userId]);
 
   const styles = {
-    page: {
-      maxWidth: 980,
-      margin: "0 auto",
-      padding: 16,
-      color: "var(--text-primary, #111827)",
-    },
-    topbar: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      gap: 12,
-      flexWrap: "wrap",
-    },
+    page: { maxWidth: 980, margin: "0 auto", padding: 16, color: "var(--text-primary, #111827)" },
+    topbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
     btn: {
       height: 36,
       borderRadius: 10,
@@ -231,19 +248,13 @@ export default function Plans() {
     dangerBtn: {
       height: 32,
       borderRadius: 10,
-      border: "1px solid var(--border-soft, #e5e7eb)",
+      border: "1px solid #fecaca",
       background: "#fff",
       color: "#b91c1c",
       padding: "0 10px",
       cursor: "pointer",
     },
-    card: {
-      border: "1px solid #e5e7eb",
-      borderRadius: 12,
-      padding: 12,
-      background: "#fff",
-      marginBottom: 12,
-    },
+    card: { border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: "#fff", marginBottom: 12 },
     title: { fontWeight: 900, fontSize: 20, marginBottom: 6 },
     muted: { opacity: 0.7 },
     row: { display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" },
@@ -257,26 +268,44 @@ export default function Plans() {
       opacity: 0.9,
       marginLeft: 8,
     },
+    resources: { marginTop: 6, fontSize: 13, opacity: 0.92 },
+    linkList: { margin: "6px 0 0", paddingLeft: 18 },
   };
 
   const stillLoading = !(plansHydrated && checkinsHydrated);
+
+  const clearAll = () => {
+    const ok = window.confirm(
+      "Clear ALL your saved plans (All Plans + Plans from Conversation + chat history)? This cannot be undone."
+    );
+    if (!ok) return;
+
+    clearUserPlanDataEverywhere(userId);
+
+    // refresh UI immediately
+    setPlans([]);
+    setCheckins([]);
+  };
 
   return (
     <div style={styles.page}>
       <div style={styles.topbar}>
         <div>
           <div style={styles.title}>Your All Plans</div>
-          <div style={{ ...styles.muted, marginBottom: 12 }}>
-            Track plans across all focuses. Check in daily.
-          </div>
+          <div style={{ ...styles.muted, marginBottom: 12 }}>Track plans across all focuses. Check in daily.</div>
         </div>
 
-        <button style={styles.btn} onClick={() => navigate("/chat")}>
-          Back to Chat
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button style={styles.btn} onClick={() => navigate("/chat")}>
+            Back to Chat
+          </button>
+          <button style={styles.dangerBtn} onClick={clearAll} title="Clears saved plans + conversation plans">
+            Clear all saved data
+          </button>
+        </div>
       </div>
 
-      {/* ✅ UPDATED: Confidence summary (per focus + need) */}
+      {/* Confidence summary (per focus + need) */}
       <div style={styles.card}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <div style={{ fontWeight: 900, fontSize: 18 }}>Confidence summary</div>
@@ -389,7 +418,6 @@ export default function Plans() {
                     Accepted: {p.acceptedAt ? new Date(p.acceptedAt).toLocaleString() : "—"}
                   </div>
 
-                  {/* ✅ UPDATED: show confidence for this plan’s NEED */}
                   <div style={{ marginTop: 8, lineHeight: 1.6 }}>
                     <b>Confidence</b>{" "}
                     <span style={styles.small}>
@@ -419,37 +447,31 @@ export default function Plans() {
               </div>
 
               <div style={{ marginTop: 10 }}>
-  <b>Steps</b>
-  <ol style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-    {(p.steps || []).map((s) => (
-      <li key={s.id} style={{ marginBottom: 10 }}>
-        <div>{s.label}</div>
+                <b>Steps</b>
+                <ol style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {(p.steps || []).map((s) => (
+                    <li key={s.id} style={{ marginBottom: 10 }}>
+                      <div>{s.label}</div>
 
-        {/* ✅ Learning links */}
-        {Array.isArray(s.resources) && s.resources.length > 0 && (
-          <div style={styles.resources}>
-            <div style={{ fontWeight: 700, marginBottom: 4 }}>
-              Learning links
-            </div>
-            <ul style={styles.linkList}>
-              {s.resources.slice(0, 3).map((r, idx) => (
-                <li key={idx} style={{ marginBottom: 4 }}>
-                  <a href={r.url} target="_blank" rel="noreferrer">
-                    {r.title}
-                  </a>
-                  {r.type ? (
-                    <span style={{ opacity: 0.75 }}> ({r.type})</span>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
-          </div>
-           )}
-         </li>
-        ))}
-      </ol>
-    </div>
-
+                      {Array.isArray(s.resources) && s.resources.length > 0 && (
+                        <div style={styles.resources}>
+                          <div style={{ fontWeight: 700, marginBottom: 4 }}>Learning links</div>
+                          <ul style={styles.linkList}>
+                            {s.resources.slice(0, 3).map((r, idx) => (
+                              <li key={idx} style={{ marginBottom: 4 }}>
+                                <a href={r.url} target="_blank" rel="noreferrer">
+                                  {r.title}
+                                </a>
+                                {r.type ? <span style={{ opacity: 0.75 }}> ({r.type})</span> : null}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </div>
             </div>
           );
         })

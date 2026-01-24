@@ -1,5 +1,5 @@
 // frontend/src/pages/Chat.jsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import mermaid from "mermaid";
 import { getProfile } from "../utils/profile";
@@ -158,11 +158,6 @@ function getAxiosErrorMessage(err) {
 
 /**
  * Map your UI "need" to backend topics.
- * Backend expects "topic" like: interview_confidence, work_focus, etc.
- * We’ll pass the best guess; backend also infers if missing.
- *
- * ✅ IMPORTANT: do NOT always force focus=work -> work_focus.
- * Need selection should win.
  */
 function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
   if (needKey === "interview") return "interview_confidence";
@@ -177,17 +172,29 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
     return slug ? `custom_${slug}` : "general";
   }
 
-  // Fallback if user didn’t pick a confidence need
   if (focus === "work") return "work_focus";
   return "general";
 }
 
 /**
- * Convert backend plan -> UI plan object (your renderer expects plan.steps with resources)
- * Backend plan: { id, title, goal, tasks:[{text,status,resources:[{title,url,type}]}], ... }
+ * ✅ UPDATED: Convert backend plan -> UI plan object (more robust)
+ * Supports tasks OR steps OR items, and string steps.
  */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
-  const tasks = Array.isArray(plan?.tasks) ? plan.tasks : [];
+  const raw =
+    (Array.isArray(plan?.tasks) && plan.tasks) ||
+    (Array.isArray(plan?.steps) && plan.steps) ||
+    (Array.isArray(plan?.items) && plan.items) ||
+    [];
+
+  const norm = raw.map((t) => {
+    if (typeof t === "string") return { text: t, resources: [] };
+    return {
+      text: t?.text ?? t?.label ?? t?.task ?? "",
+      resources: Array.isArray(t?.resources) ? t.resources : [],
+    };
+  });
+
   return {
     id: plan?.id || uid("plan"),
     title: plan?.title || `${titleCase(focus)} • ${needLabel || "Plan"}`,
@@ -195,11 +202,14 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
     focus,
     needKey,
     needLabel,
-    steps: tasks.slice(0, 12).map((t, i) => ({
-      id: `S${i + 1}`,
-      label: String(t?.text || "").trim(),
-      resources: Array.isArray(t?.resources) ? t.resources : [],
-    })),
+    steps: norm
+      .map((t, i) => ({
+        id: `S${i + 1}`,
+        label: String(t?.text || "").trim(),
+        resources: t.resources,
+      }))
+      .filter((s) => s.label) // ✅ drop empty items (prevents "1. **")
+      .slice(0, 12),
     createdAt: plan?.created_at || new Date().toISOString(),
     acceptedAt: null,
   };
@@ -222,13 +232,13 @@ export default function Chat() {
     avatar: userAvatar?.img,
   };
 
-  const userId = profile?.user_id || "local-dev";
+  // ✅ Recommend stable userId (email if you have it)
+  const userId = profile?.user_id || profile?.email || "local-dev";
   const focus = profile?.focus || "work";
 
   // ✅ need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
-  // ✅ active need for daily check-in (store ONLY the need key, not custom slug)
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
 
   const NEED_OPTIONS = [
@@ -243,7 +253,6 @@ export default function Chat() {
 
   const [needKey, setNeedKey] = useState(() => {
     const active = loadSaved(activeNeedStorage, null);
-    // Only accept values that exist in NEED_OPTIONS
     if (active && NEED_OPTIONS.some((n) => n.key === String(active))) return String(active);
 
     const saved = loadSaved(needKeyStorage, null);
@@ -267,15 +276,15 @@ export default function Chat() {
 
   const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
 
-  // ✅ per-need chat storage
+  // per-need chat storage
   const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
-  // ✅ persistent across app
+  // persistent across app
   const plansKey = `bc_plans_${userId}`;
-  // ✅ per focus “Plans from this conversation” (sessionStorage) — do NOT clear
+  // conversation plans (sessionStorage)
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
-  // ✅ confidence state per focus + needKey (localStorage)
+  // confidence per focus + need
   const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
-  // ✅ UI state across navigation (sessionStorage)
+  // UI state across navigation
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
@@ -285,7 +294,7 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // ✅ Prevent double-send
+  // Prevent double-send
   const sendingRef = useRef(false);
 
   const [plans, setPlans] = useState([]);
@@ -295,13 +304,17 @@ export default function Chat() {
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
   const [chatHydrated, setChatHydrated] = useState(false);
 
-  // (Optional) keep your confidence UX; backend will not force it
+  // confidence UX
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
-  const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() => loadSession(`${uiKey}_awaitBaselineReason`, false));
+  const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() =>
+    loadSession(`${uiKey}_awaitBaselineReason`, false)
+  );
   const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() => loadSession(`${uiKey}_awaitDailyProgress`, false));
-  const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() => loadSession(`${uiKey}_awaitDailyConfidence`, false));
+  const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() =>
+    loadSession(`${uiKey}_awaitDailyConfidence`, false)
+  );
 
-  // ✅ backend contract state (ui + plan)
+  // backend ui
   const [backendUI, setBackendUI] = useState(() =>
     loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null })
   );
@@ -309,7 +322,7 @@ export default function Chat() {
   const listRef = useRef(null);
   const reqSeqRef = useRef(0);
 
-  // Load per-need chat messages (persistent)
+  // Load per-need chat messages
   useEffect(() => {
     setChatHydrated(false);
     setMessages(loadSaved(chatKey, []));
@@ -323,7 +336,7 @@ export default function Chat() {
     setPlansHydrated(true);
   }, [plansKey]);
 
-  // Load conversation plans from sessionStorage (do NOT clear on mount)
+  // Load conversation plans
   useEffect(() => {
     const savedConv = loadSession(convPlansKey, []);
     setConvPlans(Array.isArray(savedConv) ? savedConv : []);
@@ -336,13 +349,13 @@ export default function Chat() {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, chatKey]);
 
-  // Persist global plans after hydration
+  // Persist global plans
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
   }, [plansKey, plans, plansHydrated]);
 
-  // Persist conversation plans after hydration
+  // Persist conversation plans
   useEffect(() => {
     if (!convPlansHydrated) return;
     saveSession(convPlansKey, convPlans);
@@ -357,7 +370,7 @@ export default function Chat() {
     save(customNeedLabelStorage, customNeedLabel);
   }, [customNeedLabelStorage, customNeedLabel]);
 
-  // Persist UI state across navigation
+  // Persist UI state
   useEffect(() => saveSession(`${uiKey}_draft`, input), [uiKey, input]);
   useEffect(() => saveSession(`${uiKey}_hasSpoken`, hasUserSpoken), [uiKey, hasUserSpoken]);
   useEffect(() => saveSession(`${uiKey}_readyBaseline`, readyForBaseline), [uiKey, readyForBaseline]);
@@ -367,7 +380,7 @@ export default function Chat() {
   useEffect(() => saveSession(`${uiKey}_awaitDailyConfidence`, awaitingDailyConfidence), [uiKey, awaitingDailyConfidence]);
   useEffect(() => saveSession(`${uiKey}_backendUI`, backendUI), [uiKey, backendUI]);
 
-  // Reset local UX gating when need changes (don’t clear stored chat)
+  // Reset local UX gating when need changes
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
@@ -392,7 +405,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
-  // Baseline trigger + daily check-in trigger (your UX; backend is non-blocking)
+  // Baseline + daily triggers
   useEffect(() => {
     if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
@@ -451,8 +464,6 @@ export default function Chat() {
 
   const acceptPlan = (planObj) => {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
-
-    // ✅ Store ONLY the needKey (must match dropdown options)
     save(activeNeedStorage, accepted?.needKey || needKey);
 
     setPlans((prev) => {
@@ -475,13 +486,7 @@ export default function Chat() {
 
     setMessages((prev) => [
       ...prev,
-      {
-        id: uid("msg"),
-        role: "assistant",
-        type: "text",
-        mode: "coach",
-        message: "Saved ✅ Added to this conversation and your All Plans page.",
-      },
+      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." },
     ]);
   };
 
@@ -512,13 +517,7 @@ export default function Chat() {
     try {
       const res = await axios.post(
         `${API_BASE}/chat`,
-        {
-          user_id: userId,
-          message: outboundText,
-          coach: coachId,
-          profile,
-          topic,
-        },
+        { user_id: userId, message: outboundText, coach: coachId, profile, topic },
         { timeout: AXIOS_TIMEOUT_MS }
       );
 
@@ -535,6 +534,7 @@ export default function Chat() {
       };
       setBackendUI(uiState);
 
+      // Text messages from backend
       const backendMessages = Array.isArray(data.messages) ? data.messages : [];
       if (backendMessages.length > 0) {
         setMessages((prev) => [
@@ -542,17 +542,11 @@ export default function Chat() {
           ...backendMessages
             .map((m) => String(m?.text || "").trim())
             .filter(Boolean)
-            .map((text) => ({
-              id: uid("msg"),
-              role: "assistant",
-              type: "text",
-              mode: "coach",
-              message: text,
-            })),
+            .map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text })),
         ]);
       }
 
-      // Render plan card only when backend returns plan (create/refine/show)
+      // Plan card only when backend returns structured plan
       if (data.plan && typeof data.plan === "object") {
         const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
 
@@ -578,29 +572,14 @@ ${edges}
 
         setMessages((prev) => [
           ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "plan",
-            mode: "coach",
-            plan: planObj,
-            mermaid: mermaidCode,
-            accepted: false,
-          },
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "plan_accept",
-            mode: "coach",
-            planId: planObj.id,
-            accepted: false,
-          },
+          { id: uid("msg"), role: "assistant", type: "plan", mode: "coach", plan: planObj, mermaid: mermaidCode, accepted: false },
+          { id: uid("msg"), role: "assistant", type: "plan_accept", mode: "coach", planId: planObj.id, accepted: false },
         ]);
       }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
-      // ✅ One silent retry (helps cold starts / temporary blips)
+      // One silent retry
       if (!didRetry) {
         await new Promise((r) => setTimeout(r, 800));
         return callCoachBackend(outboundText, true);
@@ -614,16 +593,7 @@ ${edges}
 
       setMessages((prev) => {
         if (alreadyHasRecentReachError(prev) && finalText.includes("couldn’t reach the coach")) return prev;
-        return [
-          ...prev,
-          {
-            id: uid("msg"),
-            role: "assistant",
-            type: "text",
-            mode: "chat",
-            message: finalText,
-          },
-        ];
+        return [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: finalText }];
       });
     }
   }
@@ -633,18 +603,10 @@ ${edges}
     try {
       await axios.post(
         `${API_BASE}/chat`,
-        {
-          user_id: userId,
-          message: String(level),
-          coach: coachId,
-          profile,
-          topic,
-        },
+        { user_id: userId, message: String(level), coach: coachId, profile, topic },
         { timeout: AXIOS_TIMEOUT_MS }
       );
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   function saveConfidence(level) {
@@ -675,10 +637,7 @@ ${edges}
 
     setAwaitingDailyProgress(false);
 
-    setMessages((prev) => [
-      ...prev,
-      { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" },
-    ]);
+    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" }]);
 
     if (didProgress) {
       setAwaitingDailyConfidence(true);
@@ -712,13 +671,7 @@ ${edges}
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "coach",
-          message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)',
-        },
+        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
       ]);
       return;
     }
@@ -751,13 +704,7 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            {
-              id: uid("msg"),
-              role: "assistant",
-              type: "text",
-              mode: "coach",
-              message: "Please reply with a number from 1 to 10 (for example: 6).",
-            },
+            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
           ]);
           return;
         }
@@ -786,13 +733,7 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            {
-              id: uid("msg"),
-              role: "assistant",
-              type: "text",
-              mode: "coach",
-              message: "Please reply with a number from 1 to 10 (for example: 6).",
-            },
+            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
           ]);
           return;
         }
@@ -800,9 +741,7 @@ ${edges}
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
 
-        await callCoachBackend(
-          `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`
-        );
+        await callCoachBackend(`My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`);
         return;
       }
 
@@ -813,9 +752,12 @@ ${edges}
     }
   };
 
+  // ✅ UPDATED: clear chat ALSO clears "Plans from this conversation"
   const clearChat = () => {
     localStorage.removeItem(chatKey);
+    sessionStorage.removeItem(convPlansKey);
     setMessages([]);
+    setConvPlans([]);
   };
 
   const styles = {
@@ -854,28 +796,14 @@ ${edges}
       color: "var(--text-primary, #111827)",
     },
     muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
-    bubbleUser: {
-      background: "var(--bg-chat-user, #111827)",
-      color: "var(--text-inverse, #ffffff)",
-      borderRadius: 12,
-      padding: 12,
-      whiteSpace: "pre-wrap",
-      lineHeight: 1.45,
-    },
-    bubbleCoach: {
-      background: "var(--bg-chat-coach, #f3f4f6)",
-      color: "var(--text-primary, #111827)",
-      borderRadius: 12,
-      padding: 12,
-      whiteSpace: "pre-wrap",
-      lineHeight: 1.45,
-    },
+    bubbleUser: { background: "var(--bg-chat-user, #111827)", color: "#fff", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
+    bubbleCoach: { background: "var(--bg-chat-coach, #f3f4f6)", color: "#111827", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
     btn: {
       height: 36,
       borderRadius: 10,
       border: "1px solid var(--border-soft, #e5e7eb)",
-      background: "var(--bg-page, #ffffff)",
-      color: "var(--text-primary, #111827)",
+      background: "#fff",
+      color: "#111827",
       padding: "0 12px",
       cursor: "pointer",
     },
@@ -883,12 +811,12 @@ ${edges}
       height: 36,
       borderRadius: 10,
       border: "1px solid var(--border-soft, #e5e7eb)",
-      background: "var(--bg-chat-user, #111827)",
-      color: "var(--text-inverse, #ffffff)",
+      background: "#111827",
+      color: "#fff",
       padding: "0 12px",
       cursor: "pointer",
     },
-    card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "var(--bg-page, #ffffff)" },
+    card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "#fff" },
     badge: {
       display: "inline-block",
       fontSize: 12,
@@ -903,10 +831,10 @@ ${edges}
       height: 42,
       borderRadius: 10,
       border: "1px solid var(--border-soft, #e5e7eb)",
-      background: "var(--bg-chat-user, #111827)",
-      color: "var(--text-inverse, #ffffff)",
+      background: "#111827",
+      color: "#fff",
       padding: "0 14px",
-      cursor: loading ? "not-allowed" : "pointer",
+      cursor: "pointer",
       opacity: loading ? 0.7 : 1,
     },
     hint: { fontSize: 12, marginTop: 6, opacity: 0.85, color: "var(--text-muted, #6b7280)" },
@@ -919,18 +847,10 @@ ${edges}
       borderRadius: 10,
       border: "1px solid var(--border-soft, #e5e7eb)",
       padding: "0 10px",
-      background: "var(--bg-page, #ffffff)",
-      color: "var(--text-primary, #111827)",
+      background: "#fff",
+      color: "#111827",
     },
-    smallInput: {
-      height: 36,
-      borderRadius: 10,
-      border: "1px solid var(--border-soft, #e5e7eb)",
-      padding: "0 10px",
-      background: "var(--bg-page, #ffffff)",
-      color: "var(--text-primary, #111827)",
-      minWidth: 220,
-    },
+    smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827", minWidth: 220 },
   };
 
   const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
@@ -961,7 +881,7 @@ ${edges}
             Change focus
           </button>
           <button onClick={clearChat} style={styles.btn}>
-            Clear chat (current need)
+            Clear chat (and conversation plans)
           </button>
         </div>
       </div>
