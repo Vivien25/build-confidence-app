@@ -3,7 +3,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
 from backend.db import SessionLocal, engine, Base
-from models import User
+from backend.models import User
 
 Base.metadata.create_all(bind=engine)
 
