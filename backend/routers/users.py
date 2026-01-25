@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from db import SessionLocal, engine, Base
+from backend.db import SessionLocal, engine, Base
 from models import User
 
 Base.metadata.create_all(bind=engine)
