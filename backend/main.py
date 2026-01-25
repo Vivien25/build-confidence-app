@@ -4,8 +4,9 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers.chat import router as chat_router
-from routers.users import router as users_router
+# ✅ Explicit imports for Docker
+from backend.routers.chat import router as chat_router
+from backend.routers.users import router as users_router
 
 app = FastAPI(title="Better Me API")
 
