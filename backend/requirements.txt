@@ -7,3 +7,5 @@ python-dotenv
 apscheduler
 sqlalchemy
 email-validator
+faster-whisper
+

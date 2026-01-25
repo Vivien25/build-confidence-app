@@ -515,6 +515,84 @@ export default function Chat() {
   const listRef = useRef(null);
   const reqSeqRef = useRef(0);
 
+  // -----------------------
+  // Voice: recording + TTS
+  // -----------------------
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const micStreamRef = useRef(null);
+  const [recording, setRecording] = useState(false);
+  const [voicesReady, setVoicesReady] = useState(false);
+
+  useEffect(() => {
+    // Load voices list (browser-dependent)
+    const load = () => {
+      try {
+        const v = window.speechSynthesis?.getVoices?.() || [];
+        if (v.length) setVoicesReady(true);
+      } catch {}
+    };
+    load();
+    try {
+      window.speechSynthesis.onvoiceschanged = load;
+    } catch {}
+    return () => {
+      try {
+        window.speechSynthesis.onvoiceschanged = null;
+      } catch {}
+    };
+  }, []);
+
+  function speakCoach(text) {
+    const t = String(text || "").trim();
+    if (!t) return;
+    if (!("speechSynthesis" in window)) return;
+
+    try {
+      // stop any previous utterance
+      window.speechSynthesis.cancel();
+
+      const u = new SpeechSynthesisUtterance(t);
+
+      // crude male/female preference; voices vary per device
+      const preferMale = String(coachId || "").toLowerCase().includes("kai") || String(coachId || "").toLowerCase().includes("male");
+      const vs = window.speechSynthesis.getVoices?.() || [];
+
+      const pick = (arr) => arr.find(Boolean);
+
+      // Try to find something English-ish first; then any
+      const enVoices = vs.filter((v) => String(v.lang || "").toLowerCase().startsWith("en"));
+      const pool = enVoices.length ? enVoices : vs;
+
+      // Some voice names hint gender (not reliable)
+      const maleHint = ["male", "david", "mark", "daniel", "alex", "fred", "tom", "guy"];
+      const femHint = ["female", "samantha", "victoria", "karen", "zira", "tessa", "allison"];
+
+      const byHint = (hints) =>
+        pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
+
+      const vPicked = preferMale ? pick([byHint(maleHint), pool[0]]) : pick([byHint(femHint), pool[0]]);
+      if (vPicked) u.voice = vPicked;
+
+      u.rate = 1.02;
+      u.pitch = preferMale ? 0.92 : 1.06;
+
+      window.speechSynthesis.speak(u);
+    } catch {
+      // ignore
+    }
+  }
+
+  function updateMessageById(setter, id, patch) {
+    setter((prev) => {
+      const idx = prev.findIndex((m) => m.id === id);
+      if (idx < 0) return prev;
+      const next = prev.slice();
+      next[idx] = { ...next[idx], ...patch };
+      return next;
+    });
+  }
+
   // ✅ Load + hydrate per-need chat messages (so old plans now show links)
   useEffect(() => {
     setChatHydrated(false);
@@ -701,6 +779,64 @@ export default function Chat() {
     ]);
   }
 
+  // Shared: apply backend ChatResponse to UI
+  function applyBackendChatResponse(data) {
+    const ui = data?.ui || {};
+    const uiState = {
+      mode: ui.mode || "CHAT",
+      show_plan_sidebar: !!ui.show_plan_sidebar,
+      plan_link: ui.plan_link || null,
+      mermaid: ui.mermaid || null,
+    };
+    setBackendUI(uiState);
+
+    const backendMessages = Array.isArray(data?.messages) ? data.messages : [];
+    let lastAssistantText = "";
+
+    if (backendMessages.length > 0) {
+      const texts = backendMessages.map((m) => String(m?.text || "").trim()).filter(Boolean);
+      lastAssistantText = texts.length ? texts[texts.length - 1] : "";
+      setMessages((prev) => [...prev, ...texts.map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text }))]);
+    }
+
+    if (data?.plan && typeof data.plan === "object") {
+      const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
+      const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
+
+      const mermaidCode =
+        uiState.mermaid && String(uiState.mermaid).trim()
+          ? String(uiState.mermaid)
+          : buildFallbackMermaidFromSteps(planObj.title, steps.map((s) => s.label));
+
+      addPlanCardToChat(planObj, mermaidCode);
+      return { lastAssistantText, hadPlan: true };
+    }
+
+    // Fallback: create plan if assistant text contains numbered steps
+    if (lastAssistantText) {
+      const extracted = extractPlanFromText(lastAssistantText);
+      if (extracted?.steps?.length) {
+        const planObj = ensureResourcesOnSteps({
+          id: uid("plan"),
+          title: `${currentNeedLabel()} Plan`,
+          goal: "",
+          focus,
+          needKey,
+          needLabel: currentNeedLabel(),
+          steps: extracted.steps.map((label, i) => ({ id: `S${i + 1}`, label: String(label || "").trim(), resources: [] })),
+          createdAt: new Date().toISOString(),
+          acceptedAt: null,
+        });
+
+        const mermaidCode = buildFallbackMermaidFromSteps(planObj.title, extracted.steps);
+        addPlanCardToChat(planObj, mermaidCode);
+        return { lastAssistantText, hadPlan: true };
+      }
+    }
+
+    return { lastAssistantText, hadPlan: false };
+  }
+
   async function callCoachBackend(outboundText, didRetry = false) {
     const mySeq = ++reqSeqRef.current;
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
@@ -714,60 +850,7 @@ export default function Chat() {
 
       if (mySeq !== reqSeqRef.current) return;
 
-      const data = res.data || {};
-
-      const ui = data.ui || {};
-      const uiState = {
-        mode: ui.mode || "CHAT",
-        show_plan_sidebar: !!ui.show_plan_sidebar,
-        plan_link: ui.plan_link || null,
-        mermaid: ui.mermaid || null,
-      };
-      setBackendUI(uiState);
-
-      const backendMessages = Array.isArray(data.messages) ? data.messages : [];
-      let lastAssistantText = "";
-
-      if (backendMessages.length > 0) {
-        const texts = backendMessages.map((m) => String(m?.text || "").trim()).filter(Boolean);
-        lastAssistantText = texts.length ? texts[texts.length - 1] : "";
-
-        setMessages((prev) => [...prev, ...texts.map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text }))]);
-      }
-
-      if (data.plan && typeof data.plan === "object") {
-        const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
-        const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
-
-        const mermaidCode =
-          uiState.mermaid && String(uiState.mermaid).trim()
-            ? String(uiState.mermaid)
-            : buildFallbackMermaidFromSteps(planObj.title, steps.map((s) => s.label));
-
-        addPlanCardToChat(planObj, mermaidCode);
-        return;
-      }
-
-      // Fallback: create plan if assistant text contains numbered steps
-      if (lastAssistantText) {
-        const extracted = extractPlanFromText(lastAssistantText);
-        if (extracted?.steps?.length) {
-          const planObj = ensureResourcesOnSteps({
-            id: uid("plan"),
-            title: `${currentNeedLabel()} Plan`,
-            goal: "",
-            focus,
-            needKey,
-            needLabel: currentNeedLabel(),
-            steps: extracted.steps.map((label, i) => ({ id: `S${i + 1}`, label: String(label || "").trim(), resources: [] })),
-            createdAt: new Date().toISOString(),
-            acceptedAt: null,
-          });
-
-          const mermaidCode = buildFallbackMermaidFromSteps(planObj.title, extracted.steps);
-          addPlanCardToChat(planObj, mermaidCode);
-        }
-      }
+      applyBackendChatResponse(res.data || {});
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
@@ -953,6 +1036,151 @@ export default function Chat() {
     }
   };
 
+  // -----------------------
+  // Voice: record + send
+  // -----------------------
+  async function startVoice() {
+    if (loading || sendingRef.current || recording) return;
+    if (awaitingDailyProgress) return;
+
+    // If user is in a strict numeric prompt, voice isn't useful
+    if (awaitingBaseline || awaitingDailyConfidence) return;
+
+    // If custom need label missing, same as text
+    if (needKey === "custom" && !customNeedLabel.trim()) {
+      setMessages((prev) => [
+        ...prev,
+        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
+      ]);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      audioChunksRef.current = [];
+
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mr.onstop = async () => {
+        try {
+          // stop mic tracks
+          try {
+            micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+          } catch {}
+          micStreamRef.current = null;
+
+          const blob = new Blob(audioChunksRef.current, { type: mr.mimeType || "audio/webm" });
+          await sendVoiceBlob(blob);
+        } catch {
+          // ignore
+        } finally {
+          audioChunksRef.current = [];
+          mediaRecorderRef.current = null;
+        }
+      };
+
+      mr.start();
+      setRecording(true);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: "I can’t access your microphone. Please allow mic permission in the browser settings, then try again.",
+        },
+      ]);
+    }
+  }
+
+  function stopVoice() {
+    if (!recording) return;
+    setRecording(false);
+    try {
+      mediaRecorderRef.current?.stop();
+    } catch {
+      // ensure mic off
+      try {
+        micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      } catch {}
+      micStreamRef.current = null;
+    }
+  }
+
+  async function sendVoiceBlob(blob) {
+    const mySeq = ++reqSeqRef.current;
+    const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
+
+    const tempUserMsgId = uid("voice_user");
+    setMessages((prev) => [...prev, { id: tempUserMsgId, role: "user", type: "text", text: "🎙️ (processing voice…)" }]);
+
+    setLoading(true);
+    sendingRef.current = true;
+
+    try {
+      const form = new FormData();
+      form.append("user_id", userId);
+      form.append("coach", coachId); // backend accepts mira/kai too
+      form.append("topic", topic);
+      form.append("profile_json", JSON.stringify(profile || {}));
+      form.append("audio", blob, "voice.webm");
+
+      const res = await axios.post(`${API_BASE}/chat/voice`, form, {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: Math.max(AXIOS_TIMEOUT_MS, 60000),
+      });
+
+      if (mySeq !== reqSeqRef.current) return;
+
+      const transcript = String(res.data?.transcript || "").trim() || "(Voice message)";
+      updateMessageById(setMessages, tempUserMsgId, { text: transcript });
+
+      const chat = res.data?.chat || {};
+      const { lastAssistantText } = applyBackendChatResponse(chat);
+
+      // Speak only for voice flows
+      if (lastAssistantText) {
+        // Ensure some browsers have voices loaded (best effort)
+        if (!voicesReady) {
+          try {
+            window.speechSynthesis.getVoices?.();
+          } catch {}
+        }
+        speakCoach(lastAssistantText);
+      }
+    } catch (err) {
+      if (mySeq !== reqSeqRef.current) return;
+
+      const msg = getAxiosErrorMessage(err);
+      updateMessageById(setMessages, tempUserMsgId, { text: "🎙️ (voice failed to send)" });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "chat",
+          message:
+            msg === "Request timed out."
+              ? "Sorry — voice took too long to process. Try a shorter message."
+              : "Sorry — I couldn’t process that voice message. Please try again.",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+      sendingRef.current = false;
+    }
+  }
+
   const clearChat = () => {
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);
@@ -1003,7 +1231,18 @@ export default function Chat() {
     primaryBtn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 12px", cursor: "pointer" },
     card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "#fff" },
     badge: { display: "inline-block", fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid var(--border-soft, #e5e7eb)", opacity: 0.9, marginLeft: 8 },
-    sendBtn: { marginTop: 8, height: 42, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 14px", cursor: "pointer", opacity: loading ? 0.7 : 1 },
+    sendBtn: { height: 42, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 14px", cursor: "pointer", opacity: loading ? 0.7 : 1 },
+    voiceBtn: {
+      height: 42,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: recording ? "#111827" : "#fff",
+      color: recording ? "#fff" : "#111827",
+      padding: "0 14px",
+      cursor: "pointer",
+      opacity: loading ? 0.7 : 1,
+      minWidth: 120,
+    },
     hint: { fontSize: 12, marginTop: 6, opacity: 0.85, color: "var(--text-muted, #6b7280)" },
     resources: { marginTop: 6, fontSize: 13, opacity: 0.92 },
     linkList: { margin: "6px 0 0", paddingLeft: 18 },
@@ -1011,6 +1250,8 @@ export default function Chat() {
     needRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
     select: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827" },
     smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827", minWidth: 220 },
+    inputRow: { display: "flex", gap: 10, alignItems: "center", marginTop: 8 },
+    rowGrow: { flex: 1 },
   };
 
   const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
@@ -1021,6 +1262,13 @@ export default function Chat() {
     if (!active) return null;
     return String(active);
   })();
+
+  const voiceDisabled =
+    loading ||
+    awaitingDailyProgress ||
+    awaitingBaseline ||
+    awaitingDailyConfidence ||
+    (needKey === "custom" && !customNeedLabel.trim());
 
   return (
     <div style={styles.page}>
@@ -1060,7 +1308,13 @@ export default function Chat() {
 
           {needKey === "custom" && (
             <>
-              <input value={customNeedLabel} onChange={(e) => setCustomNeedLabel(e.target.value)} placeholder='Name it (e.g., "Executive presence")' style={styles.smallInput} disabled={loading} />
+              <input
+                value={customNeedLabel}
+                onChange={(e) => setCustomNeedLabel(e.target.value)}
+                placeholder='Name it (e.g., "Executive presence")'
+                style={styles.smallInput}
+                disabled={loading}
+              />
               <span style={styles.muted}>Each custom name gets its own confidence baseline.</span>
             </>
           )}
@@ -1188,45 +1442,66 @@ export default function Chat() {
             )}
           </div>
 
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={
-              awaitingBaseline
-                ? "Reply with a number 1–10…"
-                : awaitingDailyConfidence
-                ? "Reply with a number 1–10…"
-                : awaitingBaselineReason
-                ? "Tell me the main reason…"
-                : awaitingDailyProgress
-                ? "Use the buttons above…"
-                : "Say something…"
-            }
-            style={styles.input}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                if (!e.repeat) sendMessage();
-              }
-            }}
-            disabled={awaitingDailyProgress}
-          />
+          <div style={styles.inputRow}>
+            <div style={styles.rowGrow}>
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder={
+                  awaitingBaseline
+                    ? "Reply with a number 1–10…"
+                    : awaitingDailyConfidence
+                    ? "Reply with a number 1–10…"
+                    : awaitingBaselineReason
+                    ? "Tell me the main reason…"
+                    : awaitingDailyProgress
+                    ? "Use the buttons above…"
+                    : recording
+                    ? "Recording… press Stop"
+                    : "Say something…"
+                }
+                style={styles.input}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!e.repeat) sendMessage();
+                  }
+                }}
+                disabled={awaitingDailyProgress}
+              />
 
-          {(showConfidenceHint || awaitingBaselineReason) && (
-            <div style={styles.hint}>
-              {showConfidenceHint ? (
-                <>
-                  Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).
-                </>
-              ) : (
-                <>Tip: one sentence is enough 🙂</>
+              {(showConfidenceHint || awaitingBaselineReason) && (
+                <div style={styles.hint}>
+                  {showConfidenceHint ? (
+                    <>
+                      Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).
+                    </>
+                  ) : (
+                    <>Tip: one sentence is enough 🙂</>
+                  )}
+                </div>
               )}
             </div>
-          )}
 
-          <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
-            {loading ? "Sending…" : "Send"}
-          </button>
+            <button
+              onClick={recording ? stopVoice : startVoice}
+              disabled={voiceDisabled && !recording}
+              style={styles.voiceBtn}
+              title={
+                awaitingBaseline || awaitingDailyConfidence
+                  ? "Voice is disabled for number-only prompts"
+                  : awaitingDailyProgress
+                  ? "Voice is disabled while daily check-in buttons are active"
+                  : "Send a voice message"
+              }
+            >
+              {recording ? "⏹ Stop" : "🎙️ Voice"}
+            </button>
+
+            <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
+              {loading ? "Sending…" : "Send"}
+            </button>
+          </div>
         </div>
 
         <div className="conv-sidebar" style={styles.sidePanel}>

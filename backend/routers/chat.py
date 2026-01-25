@@ -3,12 +3,13 @@ import os
 import json
 import re
 import traceback
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 from google import genai
@@ -16,9 +17,9 @@ from google.genai import types
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-# ---------------------------
+# ===========================
 # Gemini client
-# ---------------------------
+# ===========================
 API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 if not API_KEY:
     raise RuntimeError("Missing GEMINI_API_KEY (or GOOGLE_API_KEY) in backend/.env")
@@ -26,17 +27,95 @@ if not API_KEY:
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 client = genai.Client(api_key=API_KEY)
 
-# ---------------------------
+# ===========================
+# Local Whisper (STT)
+# ===========================
+# Choose one:
+# 1) faster-whisper (recommended): pip install faster-whisper
+# 2) openai-whisper: pip install -U openai-whisper
+#
+# NOTE: Whisper decoding usually needs ffmpeg installed on the machine.
+WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "faster")  # "faster" | "openai"
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")        # e.g. tiny/base/small/medium/large-v3
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")       # cpu | cuda (if supported)
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")  # faster-whisper compute type
+
+_whisper_ready = False
+_whisper_impl = None
+_whisper_model = None
+
+def _init_whisper_if_needed() -> None:
+    global _whisper_ready, _whisper_impl, _whisper_model
+    if _whisper_ready:
+        return
+
+    try:
+        if WHISPER_BACKEND.lower() == "openai":
+            import whisper  # type: ignore
+            _whisper_impl = "openai"
+            _whisper_model = whisper.load_model(WHISPER_MODEL)
+        else:
+            # default: faster-whisper
+            from faster_whisper import WhisperModel  # type: ignore
+            _whisper_impl = "faster"
+            _whisper_model = WhisperModel(
+                WHISPER_MODEL,
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE_TYPE,
+            )
+
+        _whisper_ready = True
+        print(f"✅ Whisper ready: impl={_whisper_impl} model={WHISPER_MODEL}")
+    except Exception as e:
+        print("❌ Whisper init failed:", repr(e))
+        traceback.print_exc()
+        _whisper_ready = False
+        _whisper_impl = None
+        _whisper_model = None
+
+def transcribe_audio_file(path: str) -> str:
+    """
+    Transcribe an audio file using local Whisper.
+    Supports common formats (webm/wav/m4a/mp3), but ffmpeg may be required.
+    """
+    _init_whisper_if_needed()
+    if not _whisper_ready or _whisper_model is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Whisper is not available on the server. Install faster-whisper or openai-whisper (and ffmpeg).",
+        )
+
+    try:
+        if _whisper_impl == "openai":
+            # openai-whisper
+            # result = {"text": "...", ...}
+            result = _whisper_model.transcribe(path)  # type: ignore
+            text = (result.get("text") or "").strip()
+            return text
+
+        # faster-whisper
+        segments, info = _whisper_model.transcribe(path)  # type: ignore
+        parts = []
+        for seg in segments:
+            t = getattr(seg, "text", "") or ""
+            if t.strip():
+                parts.append(t.strip())
+        return " ".join(parts).strip()
+
+    except Exception as e:
+        print("❌ Whisper transcription failed:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Whisper transcription error: {repr(e)}")
+
+# ===========================
 # Tiny JSON-file state store
-# ---------------------------
+# ===========================
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
 
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
     try:
@@ -46,43 +125,36 @@ def _safe_read_json(path: Path, fallback: Any) -> Any:
     except Exception:
         return fallback
 
-
 def _safe_write_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
-
 def _load_all_state() -> Dict[str, Any]:
     return _safe_read_json(STATE_FILE, {})
 
-
 def _save_all_state(all_state: Dict[str, Any]) -> None:
     _safe_write_json(STATE_FILE, all_state)
-
 
 def _get_user_bucket(all_state: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     if user_id not in all_state:
         all_state[user_id] = {}
     return all_state[user_id]
 
-
-# ---------------------------
+# ===========================
 # Request / Response models
-# ---------------------------
+# ===========================
 class ChatRequest(BaseModel):
     user_id: str = Field(..., description="Stable id (email, uuid, etc.)")
     message: str = Field(..., description="User message text")
 
-    coach: Optional[str] = None
+    coach: Optional[str] = None      # e.g. "mira" / "kai"
     profile: Optional[Dict[str, Any]] = None
     topic: Optional[str] = None
-
 
 class CoachMessage(BaseModel):
     role: str = "coach"
     text: str
-
 
 class UIState(BaseModel):
     mode: str
@@ -90,12 +162,10 @@ class UIState(BaseModel):
     plan_link: Optional[str] = None
     mermaid: Optional[str] = None
 
-
 class Effects(BaseModel):
     saved_confidence: bool = False
     created_plan_id: Optional[str] = None
     updated_plan_id: Optional[str] = None
-
 
 class ChatResponse(BaseModel):
     messages: List[CoachMessage]
@@ -103,10 +173,13 @@ class ChatResponse(BaseModel):
     effects: Effects
     plan: Optional[Dict[str, Any]] = None
 
+class VoiceChatResponse(BaseModel):
+    transcript: str
+    chat: ChatResponse
 
-# ---------------------------
+# ===========================
 # State schema
-# ---------------------------
+# ===========================
 DEFAULT_STATE = {
     "mode": "CHAT",  # CHAT | PLAN_BUILD | CHECKIN (future)
     "history": [],  # list[{role,text,ts}]
@@ -122,7 +195,6 @@ DEFAULT_STATE = {
     "plans": {},  # plan_id -> plan object
 }
 
-
 def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     merged = json.loads(json.dumps(DEFAULT_STATE))
     for k, v in state.items():
@@ -137,10 +209,9 @@ def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     merged.setdefault("plans", {})
     return merged
 
-
-# ---------------------------
+# ===========================
 # Intent / Topic router
-# ---------------------------
+# ===========================
 _NEW_PLAN_PATTERNS = [
     r"\bnew plan\b",
     r"\bcreate a new plan\b",
@@ -152,7 +223,6 @@ _NEW_PLAN_PATTERNS = [
     r"\breplace the plan\b",
     r"\bthis plan (doesn'?t|does not) work\b",
 ]
-
 _PLAN_REQUEST_PATTERNS = [
     r"\bplan\b",
     r"\broadmap\b",
@@ -163,7 +233,6 @@ _PLAN_REQUEST_PATTERNS = [
     r"\borganize\b",
     r"\bgame plan\b",
 ]
-
 _REFINE_PATTERNS = [
     r"\badjust\b",
     r"\brefine\b",
@@ -177,7 +246,6 @@ _REFINE_PATTERNS = [
     r"\bchange\b",
     r"\brevise\b",
 ]
-
 _SKIP_PATTERNS = [
     r"\bskip\b",
     r"\bjust chat\b",
@@ -185,7 +253,6 @@ _SKIP_PATTERNS = [
     r"\bstop\b",
     r"\bnot now\b",
 ]
-
 _SHOW_PLAN_PATTERNS = [
     r"\bshow (me )?the plan\b",
     r"\bsee the plan\b",
@@ -193,31 +260,24 @@ _SHOW_PLAN_PATTERNS = [
     r"\bopen the plan\b",
 ]
 
-
 def _matches_any(text: str, patterns: List[str]) -> bool:
     t = (text or "").lower()
     return any(re.search(p, t) for p in patterns)
 
-
 def explicit_new_plan_request(user_text: str) -> bool:
     return _matches_any(user_text, _NEW_PLAN_PATTERNS)
-
 
 def plan_requested(user_text: str) -> bool:
     return _matches_any(user_text, _PLAN_REQUEST_PATTERNS)
 
-
 def refine_requested(user_text: str) -> bool:
     return _matches_any(user_text, _REFINE_PATTERNS)
-
 
 def skip_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SKIP_PATTERNS)
 
-
 def show_plan_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SHOW_PLAN_PATTERNS)
-
 
 def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     if not topic:
@@ -226,7 +286,6 @@ def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     t = re.sub(r"[^a-z0-9_]+", "_", t)
     t = re.sub(r"_+", "_", t).strip("_")
     return t or None
-
 
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
     t = (user_text or "").lower()
@@ -247,15 +306,13 @@ def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) ->
 
     return "general"
 
-
-# ---------------------------
-# Deterministic mode router (NO STICKY PLAN_BUILD)
-# ---------------------------
+# ===========================
+# Deterministic mode router
+# ===========================
 DISCOVERY_QUESTIONS = [
     "When is the deadline (or when do you want to feel ready)? If you’re not sure, just say “soon.”",
     "What’s the main target: ML Ops / Data Engineering / both? (One word is fine.)",
 ]
-
 
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
     if skip_requested(user_text):
@@ -281,10 +338,9 @@ def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) 
 
     return "CHAT", None
 
-
-# ---------------------------
+# ===========================
 # Plan lock rule
-# ---------------------------
+# ===========================
 def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
     pb = state["plan_build"]
     active_id = pb.get("active_plan_id")
@@ -298,10 +354,9 @@ def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str
         return True
     return False
 
-
-# ---------------------------
+# ===========================
 # Learning resources
-# ---------------------------
+# ===========================
 RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
     "mlops": [
         {
@@ -336,7 +391,6 @@ RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
     ],
 }
 
-
 def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
     t = (task_text or "").lower()
     picks: List[Dict[str, str]] = []
@@ -367,10 +421,9 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
             break
     return out
 
-
-# ---------------------------
+# ===========================
 # Gemini helpers
-# ---------------------------
+# ===========================
 def gemini_text(system: str, user: str) -> str:
     try:
         resp = client.models.generate_content(
@@ -391,23 +444,16 @@ def gemini_text(system: str, user: str) -> str:
             return "".join([p.text for p in parts if getattr(p, "text", None)]).strip()
         return ""
     except Exception as e:
-        # ✅ This will show up in Render logs
         print("❌ GEMINI CALL FAILED")
         print("Model:", GEMINI_MODEL)
         print("Error:", repr(e))
         traceback.print_exc()
-        # Keep response body helpful for your frontend too
         raise HTTPException(status_code=500, detail=f"Gemini error: {repr(e)}")
 
-
-# ---------------------------
-# Debug endpoint (call from browser or curl)
-# ---------------------------
 @router.get("/debug/ping-gemini")
 def ping_gemini():
     txt = gemini_text("Reply with exactly the word OK.", "ping")
     return {"ok": True, "model": GEMINI_MODEL, "reply": txt}
-
 
 def extract_bullets(text: str, max_items: int = 10) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
@@ -424,10 +470,9 @@ def extract_bullets(text: str, max_items: int = 10) -> List[str]:
             break
     return bullets
 
-
-# ---------------------------
+# ===========================
 # Confidence: non-blocking metadata
-# ---------------------------
+# ===========================
 def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
     t = (user_text or "").strip().lower()
     m = re.fullmatch(r"(\d{1,2})(?:\s*/\s*10)?", t)
@@ -444,10 +489,9 @@ def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: s
     conf["updated_at"] = _now_iso()
     return True
 
-
-# ---------------------------
+# ===========================
 # Plan building primitives
-# ---------------------------
+# ===========================
 def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_text: str) -> Dict[str, Any]:
     deadline = discovery_answers.get("deadline") or "soon"
     target = discovery_answers.get("target") or "mixed"
@@ -509,7 +553,6 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
     }
     return plan
 
-
 def plan_to_mermaid(plan: Dict[str, Any]) -> str:
     title = (plan.get("title") or "Plan").replace('"', "'")
     tasks = plan.get("tasks") or []
@@ -522,11 +565,27 @@ def plan_to_mermaid(plan: Dict[str, Any]) -> str:
         lines.append(f"A --> {node_id}")
     return "\n".join(lines)
 
-
-# ---------------------------
+# ===========================
 # Mode handlers
-# ---------------------------
-def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool) -> ChatResponse:
+# ===========================
+def _coach_style(coach_id: Optional[str]) -> str:
+    """
+    Tiny style control to make Mira / Kai feel different in text.
+    Keep it subtle (your frontend does the voice pitch anyway).
+    """
+    c = (coach_id or "").lower().strip()
+    if c in ["kai", "male", "coach_kai"]:
+        return (
+            "You are Coach Kai (male). Friendly, direct, calm. "
+            "Short sentences. Practical steps. Supportive but not overly bubbly."
+        )
+    # default Mira
+    return (
+        "You are Coach Mira (female). Warm, encouraging, conversational. "
+        "Short and natural. Practical steps. Gentle confidence-building tone."
+    )
+
+def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool, coach_id: Optional[str]) -> ChatResponse:
     pb = state["plan_build"]
     plan_id = pb.get("active_plan_id") if pb.get("topic") == topic_key else None
     has_plan = bool(plan_id) and plan_id in state["plans"]
@@ -542,7 +601,8 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
         )
 
     system = (
-        "You are a friendly, helpful coach. Keep responses short and natural. "
+        f"{_coach_style(coach_id)}\n\n"
+        "You are a helpful coach. Keep responses short and natural. "
         "Do NOT create a plan unless user asks for one. "
         "If user is choosing a specific step from an existing plan, help them execute it with 3–6 concrete substeps. "
         "Avoid repeating the plan."
@@ -577,7 +637,6 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
         plan=None,
     )
 
-
 def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
     pb["topic"] = topic_key
@@ -605,7 +664,6 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
         effects=Effects(),
         plan=None,
     )
-
 
 def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
@@ -653,7 +711,6 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
         effects=Effects(created_plan_id=plan["id"]),
         plan=plan,
     )
-
 
 def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
@@ -766,17 +823,21 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
         plan=plan,
     )
 
-
-# ---------------------------
-# Main endpoint
-# ---------------------------
-@router.post("", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+# ===========================
+# Core processing (shared)
+# ===========================
+def process_chat_message(
+    user_id: str,
+    user_text: str,
+    coach: Optional[str],
+    profile: Optional[Dict[str, Any]],
+    topic: Optional[str],
+) -> ChatResponse:
     all_state = _load_all_state()
-    bucket = _get_user_bucket(all_state, req.user_id)
+    bucket = _get_user_bucket(all_state, user_id)
     state = _ensure_state_shape(bucket)
 
-    user_text = (req.message or "").strip()
+    user_text = (user_text or "").strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="Empty message")
 
@@ -786,14 +847,14 @@ def chat(req: ChatRequest) -> ChatResponse:
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
     state["history"] = state["history"][-80:]
 
-    topic_key = normalize_topic_key(req.topic) or infer_topic_key(user_text, req.profile)
+    topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
     mode, step = decide_mode_and_step(state, user_text, topic_key)
     state["mode"] = mode
 
     if mode == "CHAT":
-        resp = handle_chat(state, user_text, topic_key, saved_conf)
+        resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
     elif mode == "PLAN_BUILD":
         if step == "DISCOVERY":
             resp = handle_plan_discovery(state, user_text, topic_key)
@@ -803,7 +864,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             resp = handle_plan_refine(state, user_text, topic_key)
     else:
         state["mode"] = "CHAT"
-        resp = handle_chat(state, user_text, topic_key, saved_conf)
+        resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
 
     if resp.messages:
         state["history"].append({"role": "coach", "text": resp.messages[0].text, "ts": _now_iso()})
@@ -814,3 +875,73 @@ def chat(req: ChatRequest) -> ChatResponse:
     _save_all_state(all_state)
 
     return resp
+
+# ===========================
+# Main endpoint (text)
+# ===========================
+@router.post("", response_model=ChatResponse)
+def chat(req: ChatRequest) -> ChatResponse:
+    return process_chat_message(
+        user_id=req.user_id,
+        user_text=req.message,
+        coach=req.coach,
+        profile=req.profile,
+        topic=req.topic,
+    )
+
+# ===========================
+# Voice endpoint (audio -> whisper -> chat)
+# ===========================
+@router.post("/voice", response_model=VoiceChatResponse)
+async def chat_voice(
+    user_id: str = Form(...),
+    audio: UploadFile = File(...),
+    coach: Optional[str] = Form(None),
+    topic: Optional[str] = Form(None),
+    profile_json: Optional[str] = Form(None),
+) -> VoiceChatResponse:
+    profile: Optional[Dict[str, Any]] = None
+    if profile_json:
+        try:
+            profile = json.loads(profile_json)
+        except Exception:
+            profile = None
+
+    # Save to a temp file for whisper
+    suffix = ""
+    try:
+        # keep extension if present (helps ffmpeg sometimes)
+        name = (audio.filename or "").lower()
+        if "." in name:
+            suffix = "." + name.split(".")[-1]
+    except Exception:
+        suffix = ""
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".webm") as tmp:
+            tmp_path = tmp.name
+            content = await audio.read()
+            tmp.write(content)
+
+        transcript = transcribe_audio_file(tmp_path)
+        transcript = (transcript or "").strip()
+
+        if not transcript:
+            transcript = "(Couldn’t detect speech)"
+
+        chat_resp = process_chat_message(
+            user_id=user_id,
+            user_text=transcript,
+            coach=coach,
+            profile=profile,
+            topic=topic,
+        )
+        return VoiceChatResponse(transcript=transcript, chat=chat_resp)
+
+    finally:
+        # best-effort cleanup
+        try:
+            if "tmp_path" in locals() and tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
