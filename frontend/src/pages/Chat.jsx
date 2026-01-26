@@ -9,6 +9,12 @@ import { useNavigate } from "react-router-dom";
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const AXIOS_TIMEOUT_MS = Number(import.meta.env.VITE_CHAT_TIMEOUT_MS || 20000);
 
+// ✅ 12-hour follow-up (tab open)
+const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
+
+// ✅ Keep backend "last active" fresh while tab is visible (prevents unwanted emails)
+const HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes
+
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 // ---------- localStorage helpers (persistent) ----------
@@ -54,6 +60,10 @@ function todayStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
+function nowMs() {
+  return Date.now();
+}
+
 function parseConfidence(input) {
   const s = String(input || "").trim();
   const n = Number(s);
@@ -89,145 +99,7 @@ function isGreeting(text) {
 
 function userAskedForPlan(text) {
   const t = String(text || "").toLowerCase();
-  return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule|prep)\b/.test(t);
-}
-
-// ---------- Learning links generator (fallback) ----------
-function defaultResourcesForStep(stepLabel) {
-  const s = String(stepLabel || "").toLowerCase();
-
-  const COMMON = [
-    { title: "STAR interview method (overview)", url: "https://www.themuse.com/advice/star-interview-method", type: "article" },
-    { title: "System design primer (GitHub)", url: "https://github.com/donnemartin/system-design-primer", type: "repo" },
-    { title: "Google Cloud Architecture Center", url: "https://cloud.google.com/architecture", type: "doc" },
-  ];
-
-  const CODING = [
-    { title: "NeetCode practice patterns", url: "https://neetcode.io/practice", type: "practice" },
-    { title: "Big-O Cheat Sheet", url: "https://www.bigocheatsheet.com/", type: "reference" },
-    { title: "Grokking the Coding Interview (patterns)", url: "https://www.educative.io/courses/grokking-the-coding-interview", type: "course" },
-  ];
-
-  const ML_SYSTEMS = [
-    { title: "Rules of ML (Google)", url: "https://developers.google.com/machine-learning/guides/rules-of-ml", type: "doc" },
-    { title: "Reliable ML (Google)", url: "https://developers.google.com/machine-learning/guides/reliable-ml", type: "doc" },
-    {
-      title: "MLOps pipelines (Google Cloud)",
-      url: "https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning",
-      type: "doc",
-    },
-  ];
-
-  const BEHAVIORAL = [
-    { title: "How Google hires (interview guide)", url: "https://careers.google.com/how-we-hire/interview/", type: "guide" },
-    { title: "How to answer “Tell me about yourself” (HBR)", url: "https://hbr.org/2021/11/how-to-answer-tell-me-about-yourself", type: "article" },
-    { title: "STAR method worksheet (Indeed)", url: "https://www.indeed.com/career-advice/interviewing/star-method", type: "article" },
-  ];
-
-  if (s.includes("leetcode") || s.includes("algorithm") || s.includes("complexity") || s.includes("coding") || s.includes("code")) return CODING;
-
-  if (s.includes("system design") || s.includes("architecture") || s.includes("design") || s.includes("tradeoff") || s.includes("scal")) {
-    return [
-      { title: "System design primer (GitHub)", url: "https://github.com/donnemartin/system-design-primer", type: "repo" },
-      { title: "Google Cloud Architecture Center", url: "https://cloud.google.com/architecture", type: "doc" },
-      { title: "DDIA references / notes", url: "https://github.com/ept/ddia-references", type: "notes" },
-    ];
-  }
-
-  if (s.includes("ml") || s.includes("model") || s.includes("inference") || s.includes("serving") || s.includes("latency") || s.includes("eval")) return ML_SYSTEMS;
-
-  if (s.includes("star") || s.includes("story") || s.includes("behavior") || s.includes("project") || s.includes("experience")) return BEHAVIORAL;
-
-  return COMMON;
-}
-
-function ensureResourcesOnSteps(planObj) {
-  if (!planObj || typeof planObj !== "object") return planObj;
-
-  const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
-  const nextSteps = steps.map((s) => {
-    const has = Array.isArray(s?.resources) && s.resources.length > 0;
-    return { ...s, resources: has ? s.resources : defaultResourcesForStep(s?.label).slice(0, 3) };
-  });
-
-  return { ...planObj, steps: nextSteps };
-}
-
-function hydratePlansArray(plans) {
-  if (!Array.isArray(plans)) return [];
-  return plans.map((p) => ensureResourcesOnSteps(p));
-}
-
-function hydrateMessagesArray(msgs) {
-  if (!Array.isArray(msgs)) return [];
-  return msgs.map((m) => {
-    if (m?.type === "plan" && m?.plan) {
-      return { ...m, plan: ensureResourcesOnSteps(m.plan) };
-    }
-    return m;
-  });
-}
-
-// ---------- Mermaid helpers ----------
-function safeMermaidLabel(s) {
-  return String(s || "")
-    .replace(/"/g, "'")
-    .replace(/\r?\n/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 48);
-}
-
-function buildFallbackMermaidFromSteps(title, steps) {
-  const st = Array.isArray(steps) ? steps : [];
-  const t = safeMermaidLabel(title || "Plan");
-
-  if (!st.length) return `flowchart TD\nA["${t}"]`;
-
-  const nodes = st
-    .slice(0, 12)
-    .map((label, i) => `S${i + 1}["${safeMermaidLabel(label)}"]`)
-    .join("\n");
-
-  const edges = st
-    .slice(0, 12)
-    .map((_, i) => (i === 0 ? `A["${t}"] --> S1` : `S${i} --> S${i + 1}`))
-    .join("\n");
-
-  return `flowchart TD
-${nodes}
-${edges}
-`;
-}
-
-// ---------- Simple plan text extraction (when backend sends only numbered steps) ----------
-function extractPlanFromText(text) {
-  const raw = String(text || "").trim();
-  if (!raw) return null;
-
-  const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-
-  const numbered = [];
-  for (const l of lines) {
-    const m = l.match(/^(\d+)[\.\)]\s+(.*)$/);
-    if (m && m[2]) numbered.push(m[2].trim());
-  }
-
-  if (numbered.length === 0) {
-    const bullets = lines
-      .filter((l) => /^[-•]\s+/.test(l))
-      .map((l) => l.replace(/^[-•]\s+/, "").trim())
-      .filter(Boolean);
-    if (bullets.length >= 2) return { steps: bullets.slice(0, 12) };
-    return null;
-  }
-
-  const cleaned = numbered
-    .map((s) => s.replace(/^\*\*+|\*\*+$/g, "").trim())
-    .filter((s) => s && s !== "**");
-
-  if (cleaned.length < 2) return null;
-  return { steps: cleaned.slice(0, 12) };
+  return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule)\b/.test(t);
 }
 
 // ---------- Mermaid component ----------
@@ -293,6 +165,9 @@ function getAxiosErrorMessage(err) {
   return "Network or server error.";
 }
 
+/**
+ * Map your UI "need" to backend topics.
+ */
 function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
   if (needKey === "interview") return "interview_confidence";
   if (needKey === "presentation") return "presentation_confidence";
@@ -310,6 +185,10 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
   return "general";
 }
 
+/**
+ * Convert backend plan -> UI plan object (robust)
+ * Supports tasks OR steps OR items, and string steps.
+ */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
   const raw =
     (Array.isArray(plan?.tasks) && plan.tasks) ||
@@ -319,20 +198,13 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
 
   const norm = raw.map((t) => {
     if (typeof t === "string") return { text: t, resources: [] };
-    // ✅ accept alternative fields from backend too
-    const resources =
-      (Array.isArray(t?.resources) && t.resources) ||
-      (Array.isArray(t?.links) && t.links) ||
-      (Array.isArray(t?.learning_links) && t.learning_links) ||
-      [];
-
     return {
       text: t?.text ?? t?.label ?? t?.task ?? "",
-      resources,
+      resources: Array.isArray(t?.resources) ? t.resources : [],
     };
   });
 
-  const ui = {
+  return {
     id: plan?.id || uid("plan"),
     title: plan?.title || `${titleCase(focus)} • ${needLabel || "Plan"}`,
     goal: plan?.goal || "",
@@ -350,82 +222,71 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
     createdAt: plan?.created_at || new Date().toISOString(),
     acceptedAt: null,
   };
-
-  return ensureResourcesOnSteps(ui);
 }
 
-// ---------- Inline sidebar (shows links too) ----------
-function ConversationPlansSidebarInline({ plans }) {
+// -------- Inline sidebar (no external file needed) --------
+function ConversationPlansSidebar({ plans = [] }) {
   const styles = {
-    titleRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 },
-    title: { fontWeight: 900, fontSize: 16 },
-    card: { border: "1px solid #e5e7eb", borderRadius: 12, padding: 12, background: "#fff", marginBottom: 10 },
-    muted: { opacity: 0.75 },
-    planTitle: { fontWeight: 900, marginBottom: 6 },
-    steps: { margin: "6px 0 0", paddingLeft: 18 },
-    step: { marginBottom: 8, lineHeight: 1.35 },
-    links: { marginTop: 4, paddingLeft: 16, fontSize: 13, opacity: 0.95 },
-    linkItem: { marginBottom: 3 },
+    muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
     pill: {
       display: "inline-block",
       fontSize: 12,
       padding: "2px 8px",
       borderRadius: 999,
-      border: "1px solid #e5e7eb",
+      border: "1px solid var(--border-soft, #e5e7eb)",
       opacity: 0.9,
-      marginLeft: 6,
+      marginLeft: 8,
     },
+    linkList: { margin: "6px 0 0", paddingLeft: 18 },
   };
 
-  const safePlans = hydratePlansArray(plans);
+  if (!Array.isArray(plans) || plans.length === 0) {
+    return <div style={styles.muted}>No plans saved in this conversation yet.</div>;
+  }
 
   return (
     <div>
-      <div style={styles.titleRow}>
-        <div style={styles.title}>Plans from this conversation</div>
-      </div>
+      <div style={{ fontWeight: 900, marginBottom: 10 }}>Plans from this conversation</div>
 
-      {safePlans.length === 0 ? (
-        <div style={styles.card}>
-          <div style={styles.muted}>No saved plans yet. Accept a plan to pin it here.</div>
-        </div>
-      ) : (
-        safePlans.map((p) => (
-          <div key={p.id} style={styles.card}>
-            <div style={styles.planTitle}>
+      <div style={{ display: "grid", gap: 10 }}>
+        {plans.map((p) => (
+          <div key={p.id} style={{ border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10 }}>
+            <div style={{ fontWeight: 900, lineHeight: 1.25 }}>
               {p.title || "Plan"}
-              {p.needLabel ? <span style={styles.pill}>{p.needLabel}</span> : null}
+              {p.focus ? <span style={styles.pill}>{p.focus}</span> : null}
             </div>
 
-            {Array.isArray(p.steps) && p.steps.length > 0 ? (
-              <ol style={styles.steps}>
-                {p.steps.slice(0, 3).map((s) => (
-                  <li key={s.id} style={styles.step}>
-                    <div>{s.label}</div>
+            {p.goal ? <div style={{ marginTop: 6, ...styles.muted }}>{p.goal}</div> : null}
 
-                    {Array.isArray(s.resources) && s.resources.length > 0 ? (
-                      <ul style={styles.links}>
-                        {s.resources.slice(0, 2).map((r, idx) => (
-                          <li key={idx} style={styles.linkItem}>
-                            <a href={r.url} target="_blank" rel="noreferrer">
-                              {r.title}
-                            </a>
-                            {r.type ? <span style={{ opacity: 0.7 }}> ({r.type})</span> : null}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <div style={styles.muted}>No links found.</div>
-                    )}
-                  </li>
-                ))}
-              </ol>
+            {Array.isArray(p.steps) && p.steps.length > 0 ? (
+              <div style={{ marginTop: 8 }}>
+                <ol style={{ margin: 0, paddingLeft: 18 }}>
+                  {p.steps.slice(0, 6).map((s) => (
+                    <li key={s.id} style={{ marginBottom: 8 }}>
+                      <div>{s.label}</div>
+
+                      {Array.isArray(s.resources) && s.resources.length > 0 ? (
+                        <ul style={styles.linkList}>
+                          {s.resources.slice(0, 2).map((r, idx) => (
+                            <li key={idx}>
+                              <a href={r.url} target="_blank" rel="noreferrer">
+                                {r.title || r.url}
+                              </a>
+                              {r.type ? <span style={styles.muted}> ({r.type})</span> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+              </div>
             ) : (
-              <div style={styles.muted}>No steps found.</div>
+              <div style={{ marginTop: 8, ...styles.muted }}>No steps found.</div>
             )}
           </div>
-        ))
-      )}
+        ))}
+      </div>
     </div>
   );
 }
@@ -442,11 +303,16 @@ export default function Chat() {
   const userAvatar = avatarMap[userAvatarKey];
 
   const coachId = profile?.coachId || "mira";
-  const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || { name: "Coach", avatar: userAvatar?.img };
+  const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || {
+    name: "Coach",
+    avatar: userAvatar?.img,
+  };
 
-  const userId = profile?.user_id || profile?.email || "local-dev";
+  // ✅ Must be stable for email scheduling; your updated profile.js ensures this exists.
+  const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
 
+  // need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
@@ -471,22 +337,41 @@ export default function Chat() {
     return "interview";
   });
 
-  const [customNeedLabel, setCustomNeedLabel] = useState(() => String(loadSaved(customNeedLabelStorage, "") || ""));
+  const [customNeedLabel, setCustomNeedLabel] = useState(() => {
+    const saved = loadSaved(customNeedLabelStorage, "");
+    return String(saved || "");
+  });
 
   function currentNeedLabel() {
     const found = NEED_OPTIONS.find((x) => x.key === needKey);
-    if (needKey === "custom") return customNeedLabel?.trim() ? titleCase(customNeedLabel.trim()) : "Custom confidence";
+    if (needKey === "custom") {
+      return customNeedLabel?.trim() ? titleCase(customNeedLabel.trim()) : "Custom confidence";
+    }
     return found?.label || "Confidence";
   }
 
   const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
 
+  // per-need chat storage
   const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
+
+  // persistent across app
   const plansKey = `bc_plans_${userId}`;
+
+  // conversation plans (sessionStorage)
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
+
+  // confidence per focus + need
   const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
+
+  // UI state across navigation
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
-  const pendingKey = `${uiKey}_pendingPlanRequest`;
+
+  // ✅ local activity timestamps for 12h timer
+  const lastActivityKey = `bc_last_activity_ts_${userId}_${focus}_${needSlug}`;
+
+  // ✅ prevent repeated 12h prompt in same session until user responds
+  const checkinShownSessionKey = `${uiKey}_12h_shown`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
   const [readyForBaseline, setReadyForBaseline] = useState(() => loadSession(`${uiKey}_readyBaseline`, false));
@@ -494,6 +379,8 @@ export default function Chat() {
   const [input, setInput] = useState(() => loadSession(`${uiKey}_draft`, ""));
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  // Prevent double-send
   const sendingRef = useRef(false);
 
   const [plans, setPlans] = useState([]);
@@ -503,11 +390,13 @@ export default function Chat() {
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
   const [chatHydrated, setChatHydrated] = useState(false);
 
+  // confidence UX
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
   const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() => loadSession(`${uiKey}_awaitBaselineReason`, false));
   const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() => loadSession(`${uiKey}_awaitDailyProgress`, false));
   const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() => loadSession(`${uiKey}_awaitDailyConfidence`, false));
 
+  // backend ui
   const [backendUI, setBackendUI] = useState(() =>
     loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null })
   );
@@ -515,130 +404,84 @@ export default function Chat() {
   const listRef = useRef(null);
   const reqSeqRef = useRef(0);
 
-  // -----------------------
-  // Voice: recording + TTS
-  // -----------------------
-  const mediaRecorderRef = useRef(null);
-  const audioChunksRef = useRef([]);
-  const micStreamRef = useRef(null);
-  const [recording, setRecording] = useState(false);
-  const [voicesReady, setVoicesReady] = useState(false);
+  function anyPromptActive() {
+    return awaitingBaseline || awaitingBaselineReason || awaitingDailyProgress || awaitingDailyConfidence;
+  }
 
-  useEffect(() => {
-    // Load voices list (browser-dependent)
-    const load = () => {
-      try {
-        const v = window.speechSynthesis?.getVoices?.() || [];
-        if (v.length) setVoicesReady(true);
-      } catch {}
-    };
-    load();
-    try {
-      window.speechSynthesis.onvoiceschanged = load;
-    } catch {}
-    return () => {
-      try {
-        window.speechSynthesis.onvoiceschanged = null;
-      } catch {}
-    };
-  }, []);
+  // ------------- email scheduler support: ping backend activity -------------
+  async function pingActivity(reason = "heartbeat") {
+    const email = profile?.email;
+    if (!email) return;
 
-  function speakCoach(text) {
-    const t = String(text || "").trim();
-    if (!t) return;
-    if (!("speechSynthesis" in window)) return;
+    // Record locally for 12h timer
+    save(lastActivityKey, { ts: nowMs(), reason });
 
     try {
-      // stop any previous utterance
-      window.speechSynthesis.cancel();
-
-      const u = new SpeechSynthesisUtterance(t);
-
-      // crude male/female preference; voices vary per device
-      const preferMale = String(coachId || "").toLowerCase().includes("kai") || String(coachId || "").toLowerCase().includes("male");
-      const vs = window.speechSynthesis.getVoices?.() || [];
-
-      const pick = (arr) => arr.find(Boolean);
-
-      // Try to find something English-ish first; then any
-      const enVoices = vs.filter((v) => String(v.lang || "").toLowerCase().startsWith("en"));
-      const pool = enVoices.length ? enVoices : vs;
-
-      // Some voice names hint gender (not reliable)
-      const maleHint = ["male", "david", "mark", "daniel", "alex", "fred", "tom", "guy"];
-      const femHint = ["female", "samantha", "victoria", "karen", "zira", "tessa", "allison"];
-
-      const byHint = (hints) => pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
-
-      const vPicked = preferMale ? pick([byHint(maleHint), pool[0]]) : pick([byHint(femHint), pool[0]]);
-      if (vPicked) u.voice = vPicked;
-
-      u.rate = 1.02;
-      u.pitch = preferMale ? 0.92 : 1.06;
-
-      window.speechSynthesis.speak(u);
+      await axios.post(
+        `${API_BASE}/notify/activity`,
+        {
+          user_id: userId,
+          email,
+          focus,
+          need_slug: needSlug,
+          need_label: currentNeedLabel(),
+        },
+        { timeout: AXIOS_TIMEOUT_MS }
+      );
     } catch {
       // ignore
     }
   }
 
-  function updateMessageById(setter, id, patch) {
-    setter((prev) => {
-      const idx = prev.findIndex((m) => m.id === id);
-      if (idx < 0) return prev;
-      const next = prev.slice();
-      next[idx] = { ...next[idx], ...patch };
-      return next;
-    });
-  }
-
-  // ✅ Load + hydrate per-need chat messages (so old plans now show links)
+  // Load per-need chat messages
   useEffect(() => {
     setChatHydrated(false);
-    const loaded = loadSaved(chatKey, []);
-    const hydrated = hydrateMessagesArray(loaded);
-    setMessages(hydrated);
-    // Save back once (migration)
-    save(chatKey, hydrated);
+    setMessages(loadSaved(chatKey, []));
     setChatHydrated(true);
   }, [chatKey]);
 
-  // ✅ Load + hydrate global plans (migration)
+  // Load global plans
   useEffect(() => {
     const p = loadSaved(plansKey, []);
-    const hydrated = hydratePlansArray(p);
-    setPlans(hydrated);
-    save(plansKey, hydrated);
+    setPlans(Array.isArray(p) ? p : []);
     setPlansHydrated(true);
   }, [plansKey]);
 
-  // ✅ Load + hydrate conversation plans (migration)
+  // Load conversation plans
   useEffect(() => {
     const savedConv = loadSession(convPlansKey, []);
-    const hydrated = hydratePlansArray(savedConv);
-    setConvPlans(hydrated);
-    saveSession(convPlansKey, hydrated);
+    setConvPlans(Array.isArray(savedConv) ? savedConv : []);
     setConvPlansHydrated(true);
   }, [convPlansKey]);
 
+  // Persist chat
   useEffect(() => {
     save(chatKey, messages);
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, chatKey]);
 
+  // Persist global plans
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
   }, [plansKey, plans, plansHydrated]);
 
+  // Persist conversation plans
   useEffect(() => {
     if (!convPlansHydrated) return;
     saveSession(convPlansKey, convPlans);
   }, [convPlansKey, convPlans, convPlansHydrated]);
 
-  useEffect(() => save(needKeyStorage, needKey), [needKeyStorage, needKey]);
-  useEffect(() => save(customNeedLabelStorage, customNeedLabel), [customNeedLabelStorage, customNeedLabel]);
+  // Persist need selection
+  useEffect(() => {
+    save(needKeyStorage, needKey);
+  }, [needKeyStorage, needKey]);
 
+  useEffect(() => {
+    save(customNeedLabelStorage, customNeedLabel);
+  }, [customNeedLabelStorage, customNeedLabel]);
+
+  // Persist UI state
   useEffect(() => saveSession(`${uiKey}_draft`, input), [uiKey, input]);
   useEffect(() => saveSession(`${uiKey}_hasSpoken`, hasUserSpoken), [uiKey, hasUserSpoken]);
   useEffect(() => saveSession(`${uiKey}_readyBaseline`, readyForBaseline), [uiKey, readyForBaseline]);
@@ -648,20 +491,120 @@ export default function Chat() {
   useEffect(() => saveSession(`${uiKey}_awaitDailyConfidence`, awaitingDailyConfidence), [uiKey, awaitingDailyConfidence]);
   useEffect(() => saveSession(`${uiKey}_backendUI`, backendUI), [uiKey, backendUI]);
 
+  // ✅ On chat open / focus/need change: ping activity once (helps email system)
+  useEffect(() => {
+    // only if profile has email; pingActivity handles that
+    pingActivity("chat_open");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, focus, needSlug]);
+
+  // ✅ Heartbeat while tab visible (prevents emails while user is “there”)
+  useEffect(() => {
+    if (!hasUserSpoken) return;
+
+    let interval = null;
+
+    const start = () => {
+      if (document.visibilityState !== "visible") return;
+      if (interval) return;
+      // ping immediately, then every HEARTBEAT_MS
+      pingActivity("heartbeat");
+      interval = window.setInterval(() => pingActivity("heartbeat"), HEARTBEAT_MS);
+    };
+
+    const stop = () => {
+      if (interval) {
+        window.clearInterval(interval);
+        interval = null;
+      }
+    };
+
+    const onVis = () => {
+      if (document.visibilityState === "visible") start();
+      else stop();
+    };
+
+    start();
+    document.addEventListener("visibilitychange", onVis);
+
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasUserSpoken, userId, focus, needSlug]);
+
+  // ✅ 12-hour follow-up in chat window (while tab open)
+  useEffect(() => {
+    if (!hasUserSpoken) return;
+
+    let timer = null;
+
+    const shown = loadSession(checkinShownSessionKey, false);
+    if (shown) return;
+
+    const last = loadSaved(lastActivityKey, null);
+    const lastTs = typeof last?.ts === "number" ? last.ts : null;
+
+    // If we have no activity timestamp yet, create one now (so timer can start)
+    const base = lastTs ?? nowMs();
+    if (!lastTs) save(lastActivityKey, { ts: base, reason: "init" });
+
+    const elapsed = nowMs() - base;
+    const remaining = Math.max(0, TWELVE_HOURS_MS - elapsed);
+
+    const show12hPrompt = () => {
+      // Do not stack prompts
+      if (anyPromptActive()) return;
+
+      // Mark shown (this session) so it doesn't repeat until user answers
+      saveSession(checkinShownSessionKey, true);
+
+      setAwaitingDailyProgress(true);
+
+      upsertSystemMessage(setMessages, {
+        id: `system_12h_${focus}_${needSlug}`,
+        role: "assistant",
+        type: "daily_progress",
+        kind: "daily_prompt",
+        mode: "coach",
+        message: `Quick check-in ⏰\nIt’s been about 12 hours.\nDid you get a chance to work on your **${currentNeedLabel()}** plan?`,
+      });
+    };
+
+    if (remaining === 0) {
+      show12hPrompt();
+      return;
+    }
+
+    timer = window.setTimeout(show12hPrompt, remaining);
+
+    return () => {
+      if (timer) window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasUserSpoken, userId, focus, needSlug, awaitingBaseline, awaitingBaselineReason, awaitingDailyProgress, awaitingDailyConfidence]);
+
+  // Reset local UX gating when need changes
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
     setAwaitingDailyProgress(false);
     setAwaitingDailyConfidence(false);
     setReadyForBaseline(false);
-    saveSession(pendingKey, null);
+
+    // allow 12h check-in to show again in this session for a new need
+    saveSession(checkinShownSessionKey, false);
 
     setMessages((prev) =>
       prev.filter(
         (m) =>
           !(
             m.type === "system" &&
-            (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt" || m.kind === "daily_prompt" || m.kind === "daily_conf_prompt")
+            (m.kind === "baseline_prompt" ||
+              m.kind === "baseline_reason_prompt" ||
+              m.kind === "daily_prompt" ||
+              m.kind === "daily_conf_prompt")
           )
       )
     );
@@ -670,9 +613,13 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
+  // Baseline + (daily-by-date) triggers (kept)
   useEffect(() => {
     if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
+
+    // Avoid stacking with 12h prompt
+    if (anyPromptActive()) return;
 
     const conf = loadSaved(confidenceKey, null);
     const t = todayStr();
@@ -682,50 +629,35 @@ export default function Chat() {
     if (needKey === "custom" && !customNeedLabel.trim()) return;
 
     if (!conf || typeof conf?.baseline !== "number") {
-      if (!awaitingBaseline && !awaitingBaselineReason) {
-        setAwaitingBaseline(true);
-        setAwaitingDailyProgress(false);
-        setAwaitingDailyConfidence(false);
-
-        upsertSystemMessage(setMessages, {
-          id: `system_baseline_${focus}_${needSlug}`,
-          role: "assistant",
-          type: "system",
-          kind: "baseline_prompt",
-          mode: "coach",
-          message: `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
-        });
-      }
+      setAwaitingBaseline(true);
+      upsertSystemMessage(setMessages, {
+        id: `system_baseline_${focus}_${needSlug}`,
+        role: "assistant",
+        type: "system",
+        kind: "baseline_prompt",
+        mode: "coach",
+        message: `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
+      });
       return;
     }
 
     const lastChecked = String(conf?.lastCheckDate || "");
     if (lastChecked !== t) {
-      if (!awaitingDailyProgress && !awaitingDailyConfidence) {
-        setAwaitingDailyProgress(true);
-        setAwaitingBaseline(false);
-        setAwaitingBaselineReason(false);
-
-        upsertSystemMessage(setMessages, {
-          id: `system_daily_${focus}_${needSlug}`,
-          role: "assistant",
-          type: "daily_progress",
-          kind: "daily_prompt",
-          mode: "coach",
-          message: `Quick check-in 🌱\nDid you get a chance to work on your **${nLabel}** plan since last time?`,
-        });
-      }
-    } else {
-      setAwaitingDailyProgress(false);
-      setAwaitingDailyConfidence(false);
-      setAwaitingBaseline(false);
-      setAwaitingBaselineReason(false);
+      setAwaitingDailyProgress(true);
+      upsertSystemMessage(setMessages, {
+        id: `system_daily_${focus}_${needSlug}`,
+        role: "assistant",
+        type: "daily_progress",
+        kind: "daily_prompt",
+        mode: "coach",
+        message: `Quick check-in 🌱\nDid you get a chance to work on your **${nLabel}** plan since last time?`,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
 
   const acceptPlan = (planObj) => {
-    const accepted = { ...ensureResourcesOnSteps(planObj), acceptedAt: new Date().toISOString() };
+    const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
     save(activeNeedStorage, accepted?.needKey || needKey);
 
     setPlans((prev) => {
@@ -740,13 +672,19 @@ export default function Chat() {
 
     setMessages((prev) =>
       prev.map((m) => {
-        if (m.type === "plan" && m.plan?.id === planObj.id) return { ...m, accepted: true, plan: accepted };
+        if (m.type === "plan" && m.plan?.id === planObj.id) return { ...m, accepted: true };
         if (m.type === "plan_accept" && m.planId === planObj.id) return { ...m, accepted: true };
         return m;
       })
     );
 
-    setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." },
+    ]);
+
+    // activity ping (email system)
+    pingActivity("accept_plan");
   };
 
   const revisePlan = async () => {
@@ -768,74 +706,6 @@ export default function Chat() {
     return last?.role === "assistant" && last?.type === "text" && txt.includes("couldn’t reach the coach");
   }
 
-  function addPlanCardToChat(planObj, mermaidCode) {
-    const finalPlan = ensureResourcesOnSteps(planObj);
-
-    setMessages((prev) => [
-      ...prev,
-      { id: uid("msg"), role: "assistant", type: "plan", mode: "coach", plan: finalPlan, mermaid: mermaidCode, accepted: false },
-      { id: uid("msg"), role: "assistant", type: "plan_accept", mode: "coach", planId: finalPlan.id, accepted: false },
-    ]);
-  }
-
-  // Shared: apply backend ChatResponse to UI
-  function applyBackendChatResponse(data) {
-    const ui = data?.ui || {};
-    const uiState = {
-      mode: ui.mode || "CHAT",
-      show_plan_sidebar: !!ui.show_plan_sidebar,
-      plan_link: ui.plan_link || null,
-      mermaid: ui.mermaid || null,
-    };
-    setBackendUI(uiState);
-
-    const backendMessages = Array.isArray(data?.messages) ? data.messages : [];
-    let lastAssistantText = "";
-
-    if (backendMessages.length > 0) {
-      const texts = backendMessages.map((m) => String(m?.text || "").trim()).filter(Boolean);
-      lastAssistantText = texts.length ? texts[texts.length - 1] : "";
-      setMessages((prev) => [...prev, ...texts.map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text }))]);
-    }
-
-    if (data?.plan && typeof data.plan === "object") {
-      const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
-      const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
-
-      const mermaidCode =
-        uiState.mermaid && String(uiState.mermaid).trim()
-          ? String(uiState.mermaid)
-          : buildFallbackMermaidFromSteps(planObj.title, steps.map((s) => s.label));
-
-      addPlanCardToChat(planObj, mermaidCode);
-      return { lastAssistantText, hadPlan: true };
-    }
-
-    // Fallback: create plan if assistant text contains numbered steps
-    if (lastAssistantText) {
-      const extracted = extractPlanFromText(lastAssistantText);
-      if (extracted?.steps?.length) {
-        const planObj = ensureResourcesOnSteps({
-          id: uid("plan"),
-          title: `${currentNeedLabel()} Plan`,
-          goal: "",
-          focus,
-          needKey,
-          needLabel: currentNeedLabel(),
-          steps: extracted.steps.map((label, i) => ({ id: `S${i + 1}`, label: String(label || "").trim(), resources: [] })),
-          createdAt: new Date().toISOString(),
-          acceptedAt: null,
-        });
-
-        const mermaidCode = buildFallbackMermaidFromSteps(planObj.title, extracted.steps);
-        addPlanCardToChat(planObj, mermaidCode);
-        return { lastAssistantText, hadPlan: true };
-      }
-    }
-
-    return { lastAssistantText, hadPlan: false };
-  }
-
   async function callCoachBackend(outboundText, didRetry = false) {
     const mySeq = ++reqSeqRef.current;
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
@@ -849,7 +719,57 @@ export default function Chat() {
 
       if (mySeq !== reqSeqRef.current) return;
 
-      applyBackendChatResponse(res.data || {});
+      const data = res.data || {};
+
+      const ui = data.ui || {};
+      const uiState = {
+        mode: ui.mode || "CHAT",
+        show_plan_sidebar: !!ui.show_plan_sidebar,
+        plan_link: ui.plan_link || null,
+        mermaid: ui.mermaid || null,
+      };
+      setBackendUI(uiState);
+
+      const backendMessages = Array.isArray(data.messages) ? data.messages : [];
+      if (backendMessages.length > 0) {
+        setMessages((prev) => [
+          ...prev,
+          ...backendMessages
+            .map((m) => String(m?.text || "").trim())
+            .filter(Boolean)
+            .map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text })),
+        ]);
+      }
+
+      if (data.plan && typeof data.plan === "object") {
+        const planObj = adaptBackendPlanToUI(data.plan, focus, needKey, currentNeedLabel());
+
+        const mermaidCode =
+          uiState.mermaid && String(uiState.mermaid).trim()
+            ? String(uiState.mermaid)
+            : (() => {
+                const safe = (t) => String(t || "").replace(/"/g, '\\"');
+                const steps = Array.isArray(planObj.steps) ? planObj.steps : [];
+                if (!steps.length) return `flowchart TD\nA["${safe(planObj.title || "Plan")}"]`;
+                const first = steps?.[0]?.id || "S1";
+                const nodes = steps.map((s) => `${s.id}["${safe(s.label)}"]`).join("\n");
+                const edges = steps
+                  .slice(0, -1)
+                  .map((_, i) => `${steps[i].id} --> ${steps[i + 1].id}`)
+                  .join("\n");
+                return `flowchart TD
+A["${safe(planObj.title || "Plan")}"] --> ${first}
+${nodes}
+${edges}
+`;
+              })();
+
+        setMessages((prev) => [
+          ...prev,
+          { id: uid("msg"), role: "assistant", type: "plan", mode: "coach", plan: planObj, mermaid: mermaidCode, accepted: false },
+          { id: uid("msg"), role: "assistant", type: "plan_accept", mode: "coach", planId: planObj.id, accepted: false },
+        ]);
+      }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
@@ -859,7 +779,10 @@ export default function Chat() {
       }
 
       const msg = getAxiosErrorMessage(err);
-      const finalText = msg === "Request timed out." ? "Sorry — the coach is taking too long. Please try sending again." : "Sorry — I couldn’t reach the coach just now. Please try again.";
+      const finalText =
+        msg === "Request timed out."
+          ? "Sorry — the coach is taking too long. Please try sending again."
+          : "Sorry — I couldn’t reach the coach just now. Please try again.";
 
       setMessages((prev) => {
         if (alreadyHasRecentReachError(prev) && finalText.includes("couldn’t reach the coach")) return prev;
@@ -871,8 +794,14 @@ export default function Chat() {
   async function syncBaselineToBackend(level) {
     const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
     try {
-      await axios.post(`${API_BASE}/chat`, { user_id: userId, message: String(level), coach: coachId, profile, topic }, { timeout: AXIOS_TIMEOUT_MS });
-    } catch {}
+      await axios.post(
+        `${API_BASE}/chat`,
+        { user_id: userId, message: String(level), coach: coachId, profile, topic },
+        { timeout: AXIOS_TIMEOUT_MS }
+      );
+    } catch {
+      // ignore
+    }
   }
 
   function saveConfidence(level) {
@@ -902,7 +831,14 @@ export default function Chat() {
     const nLabel = currentNeedLabel();
 
     setAwaitingDailyProgress(false);
+
+    // ✅ allow next 12h prompt in this session after user answers
+    saveSession(checkinShownSessionKey, false);
+
     setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" }]);
+
+    // mark activity for both timer + email
+    pingActivity("daily_progress_answer");
 
     if (didProgress) {
       setAwaitingDailyConfidence(true);
@@ -920,7 +856,9 @@ export default function Chat() {
     setLoading(true);
     sendingRef.current = true;
     try {
-      await callCoachBackend(`I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`);
+      await callCoachBackend(
+        `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`
+      );
     } finally {
       setLoading(false);
       sendingRef.current = false;
@@ -946,52 +884,32 @@ export default function Chat() {
     setLoading(true);
 
     if (!isGreeting(userText)) setHasUserSpoken(true);
-
-    const askedPlan = userAskedForPlan(userText);
-    if (askedPlan) setReadyForBaseline(true);
+    if (!readyForBaseline && userAskedForPlan(userText)) setReadyForBaseline(true);
 
     setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text" }]);
+
+    // ✅ activity ping (drives email scheduler + 12h timer)
+    pingActivity("user_message");
 
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
 
     try {
-      const conf = loadSaved(confidenceKey, null);
-      const hasBaseline = conf && typeof conf?.baseline === "number";
-
-      if (askedPlan && !hasBaseline && !awaitingBaseline && !awaitingBaselineReason) {
-        saveSession(pendingKey, userText);
-        setAwaitingBaseline(true);
-
-        upsertSystemMessage(setMessages, {
-          id: `system_baseline_${focus}_${needSlug}`,
-          role: "assistant",
-          type: "system",
-          kind: "baseline_prompt",
-          mode: "coach",
-          message: `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
-        });
-        return;
-      }
-
       if (awaitingBaselineReason) {
         setAwaitingBaselineReason(false);
-        const pending = loadSession(pendingKey, null);
-        saveSession(pendingKey, null);
-
-        const combined =
-          pending && String(pending).trim()
-            ? `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. Also, my original request was: "${pending}". Please respond with empathy + practical suggestions, and create/refine a clear step-by-step plan.`
-            : `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. Help me with empathy + practical suggestions, and (if useful) refine my existing plan.`;
-
-        await callCoachBackend(combined);
+        await callCoachBackend(
+          `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. Help me with empathy + practical suggestions, and (if useful) refine my existing plan.`
+        );
         return;
       }
 
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
-          setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." }]);
+          setMessages((prev) => [
+            ...prev,
+            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+          ]);
           return;
         }
 
@@ -1011,18 +929,27 @@ export default function Chat() {
           mode: "coach",
           message: `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\nWhat’s the main reason it feels like a ${level} (and not higher)?`,
         });
+
+        // baseline counts as activity
+        pingActivity("baseline_saved");
         return;
       }
 
       if (awaitingDailyConfidence) {
         const level = parseConfidence(userText);
         if (level == null) {
-          setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." }]);
+          setMessages((prev) => [
+            ...prev,
+            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+          ]);
           return;
         }
 
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
+
+        // counts as activity
+        pingActivity("daily_confidence_saved");
 
         await callCoachBackend(`My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`);
         return;
@@ -1035,182 +962,16 @@ export default function Chat() {
     }
   };
 
-  // -----------------------
-  // Voice: record + send
-  // -----------------------
-  async function startVoice() {
-    if (loading || sendingRef.current || recording) return;
-    if (awaitingDailyProgress) return;
-
-    // If user is in a strict numeric prompt, voice isn't useful
-    if (awaitingBaseline || awaitingDailyConfidence) return;
-
-    // If custom need label missing, same as text
-    if (needKey === "custom" && !customNeedLabel.trim()) {
-      setMessages((prev) => [
-        ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
-      ]);
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStreamRef.current = stream;
-
-      // ✅ Better browser compatibility (some browsers dislike audio/webm)
-      const preferredMime =
-        window.MediaRecorder?.isTypeSupported?.("audio/webm;codecs=opus")
-          ? "audio/webm;codecs=opus"
-          : window.MediaRecorder?.isTypeSupported?.("audio/webm")
-          ? "audio/webm"
-          : "";
-
-      const mr = preferredMime ? new MediaRecorder(stream, { mimeType: preferredMime }) : new MediaRecorder(stream);
-
-      mediaRecorderRef.current = mr;
-      audioChunksRef.current = [];
-
-      mr.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      mr.onstop = async () => {
-        try {
-          // stop mic tracks
-          try {
-            micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
-          } catch {}
-          micStreamRef.current = null;
-
-          const blob = new Blob(audioChunksRef.current, { type: mr.mimeType || "audio/webm" });
-
-          // ✅ Guard: empty recordings should not be sent
-          if (!blob || blob.size < 200) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: uid("msg"),
-                role: "assistant",
-                type: "text",
-                mode: "chat",
-                message: "I didn’t catch any audio. Please try again (and make sure your mic is working).",
-              },
-            ]);
-            return;
-          }
-
-          await sendVoiceBlob(blob);
-        } catch {
-          // ignore
-        } finally {
-          audioChunksRef.current = [];
-          mediaRecorderRef.current = null;
-        }
-      };
-
-      mr.start();
-      setRecording(true);
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "coach",
-          message: "I can’t access your microphone. Please allow mic permission in the browser settings, then try again.",
-        },
-      ]);
-    }
-  }
-
-  function stopVoice() {
-    if (!recording) return;
-    setRecording(false);
-    try {
-      mediaRecorderRef.current?.stop();
-    } catch {
-      // ensure mic off
-      try {
-        micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
-      } catch {}
-      micStreamRef.current = null;
-    }
-  }
-
-  async function sendVoiceBlob(blob) {
-    const mySeq = ++reqSeqRef.current;
-    const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
-
-    const tempUserMsgId = uid("voice_user");
-    setMessages((prev) => [...prev, { id: tempUserMsgId, role: "user", type: "text", text: "🎙️ (processing voice…)" }]);
-
-    setLoading(true);
-    sendingRef.current = true;
-
-    try {
-      const form = new FormData();
-      form.append("user_id", userId);
-      form.append("coach", coachId); // backend accepts mira/kai too
-      form.append("topic", topic);
-      form.append("profile_json", JSON.stringify(profile || {}));
-      form.append("audio", blob, "voice.webm");
-
-      // ✅ IMPORTANT: Do NOT set Content-Type manually (axios/browser will add the boundary)
-      const res = await axios.post(`${API_BASE}/chat/voice`, form, {
-        timeout: Math.max(AXIOS_TIMEOUT_MS, 60000),
-      });
-
-      if (mySeq !== reqSeqRef.current) return;
-
-      const transcript = String(res.data?.transcript || "").trim() || "(Voice message)";
-      updateMessageById(setMessages, tempUserMsgId, { text: transcript });
-
-      const chat = res.data?.chat || {};
-      const { lastAssistantText } = applyBackendChatResponse(chat);
-
-      // Speak only for voice flows
-      if (lastAssistantText) {
-        // Ensure some browsers have voices loaded (best effort)
-        if (!voicesReady) {
-          try {
-            window.speechSynthesis.getVoices?.();
-          } catch {}
-        }
-        speakCoach(lastAssistantText);
-      }
-    } catch (err) {
-      if (mySeq !== reqSeqRef.current) return;
-
-      const msg = getAxiosErrorMessage(err);
-      updateMessageById(setMessages, tempUserMsgId, { text: "🎙️ (voice failed to send)" });
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "chat",
-          message:
-            msg === "Request timed out."
-              ? "Sorry — voice took too long to process. Try a shorter message."
-              : `Sorry — I couldn’t process that voice message. Please try again.\n(${msg})`,
-        },
-      ]);
-    } finally {
-      setLoading(false);
-      sendingRef.current = false;
-    }
-  }
-
+  // Clear chat + conversation plans
   const clearChat = () => {
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);
-    saveSession(pendingKey, null);
     setMessages([]);
     setConvPlans([]);
+    // reset 12h prompt for this session
+    saveSession(checkinShownSessionKey, false);
+    // record activity (optional)
+    pingActivity("clear_chat");
   };
 
   const styles = {
@@ -1251,21 +1012,44 @@ export default function Chat() {
     muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
     bubbleUser: { background: "var(--bg-chat-user, #111827)", color: "#fff", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
     bubbleCoach: { background: "var(--bg-chat-coach, #f3f4f6)", color: "#111827", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
-    btn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#fff", color: "#111827", padding: "0 12px", cursor: "pointer" },
-    primaryBtn: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 12px", cursor: "pointer" },
+    btn: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "#fff",
+      color: "#111827",
+      padding: "0 12px",
+      cursor: "pointer",
+    },
+    primaryBtn: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      background: "#111827",
+      color: "#fff",
+      padding: "0 12px",
+      cursor: "pointer",
+    },
     card: { border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10, background: "#fff" },
-    badge: { display: "inline-block", fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid var(--border-soft, #e5e7eb)", opacity: 0.9, marginLeft: 8 },
-    sendBtn: { height: 42, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", background: "#111827", color: "#fff", padding: "0 14px", cursor: "pointer", opacity: loading ? 0.7 : 1 },
-    voiceBtn: {
+    badge: {
+      display: "inline-block",
+      fontSize: 12,
+      padding: "2px 8px",
+      borderRadius: 999,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      opacity: 0.9,
+      marginLeft: 8,
+    },
+    sendBtn: {
+      marginTop: 8,
       height: 42,
       borderRadius: 10,
       border: "1px solid var(--border-soft, #e5e7eb)",
-      background: recording ? "#111827" : "#fff",
-      color: recording ? "#fff" : "#111827",
+      background: "#111827",
+      color: "#fff",
       padding: "0 14px",
       cursor: "pointer",
       opacity: loading ? 0.7 : 1,
-      minWidth: 120,
     },
     hint: { fontSize: 12, marginTop: 6, opacity: 0.85, color: "var(--text-muted, #6b7280)" },
     resources: { marginTop: 6, fontSize: 13, opacity: 0.92 },
@@ -1274,8 +1058,6 @@ export default function Chat() {
     needRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
     select: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827" },
     smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827", minWidth: 220 },
-    inputRow: { display: "flex", gap: 10, alignItems: "center", marginTop: 8 },
-    rowGrow: { flex: 1 },
   };
 
   const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
@@ -1283,16 +1065,8 @@ export default function Chat() {
 
   const activeNeedHint = (() => {
     const active = loadSaved(activeNeedStorage, null);
-    if (!active) return null;
-    return String(active);
+    return active ? String(active) : null;
   })();
-
-  const voiceDisabled =
-    loading ||
-    awaitingDailyProgress ||
-    awaitingBaseline ||
-    awaitingDailyConfidence ||
-    (needKey === "custom" && !customNeedLabel.trim());
 
   return (
     <div style={styles.page}>
@@ -1318,6 +1092,7 @@ export default function Chat() {
         </div>
       </div>
 
+      {/* Need selector */}
       <div style={{ marginTop: 12, ...styles.card }}>
         <div style={styles.needRow}>
           <div style={{ fontWeight: 800 }}>What confidence area are we working on?</div>
@@ -1352,6 +1127,7 @@ export default function Chat() {
       </div>
 
       <div className="chat-layout" style={styles.layout}>
+        {/* LEFT: Chat */}
         <div>
           <div ref={listRef} style={styles.panel}>
             {messages.length === 0 && <div style={styles.muted}>Say what’s on your mind — I’ll respond like a real conversation.</div>}
@@ -1411,7 +1187,7 @@ export default function Chat() {
                                         {s.resources.slice(0, 3).map((r, idx) => (
                                           <li key={idx} style={{ marginBottom: 4 }}>
                                             <a href={r.url} target="_blank" rel="noreferrer">
-                                              {r.title}
+                                              {r.title || r.url}
                                             </a>
                                             {r.type ? <span style={{ opacity: 0.75 }}> ({r.type})</span> : null}
                                           </li>
@@ -1466,70 +1242,60 @@ export default function Chat() {
             )}
           </div>
 
-          <div style={styles.inputRow}>
-            <div style={styles.rowGrow}>
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={
-                  awaitingBaseline
-                    ? "Reply with a number 1–10…"
-                    : awaitingDailyConfidence
-                    ? "Reply with a number 1–10…"
-                    : awaitingBaselineReason
-                    ? "Tell me the main reason…"
-                    : awaitingDailyProgress
-                    ? "Use the buttons above…"
-                    : recording
-                    ? "Recording… press Stop"
-                    : "Say something…"
-                }
-                style={styles.input}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (!e.repeat) sendMessage();
-                  }
-                }}
-                disabled={awaitingDailyProgress}
-              />
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={
+              awaitingBaseline
+                ? "Reply with a number 1–10…"
+                : awaitingDailyConfidence
+                ? "Reply with a number 1–10…"
+                : awaitingBaselineReason
+                ? "Tell me the main reason…"
+                : awaitingDailyProgress
+                ? "Use the buttons above…"
+                : "Say something…"
+            }
+            style={styles.input}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                if (!e.repeat) sendMessage();
+              }
+            }}
+            disabled={awaitingDailyProgress}
+          />
 
-              {(showConfidenceHint || awaitingBaselineReason) && (
-                <div style={styles.hint}>
-                  {showConfidenceHint ? (
-                    <>
-                      Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).
-                    </>
-                  ) : (
-                    <>Tip: one sentence is enough 🙂</>
-                  )}
-                </div>
+          {(showConfidenceHint || awaitingBaselineReason) && (
+            <div style={styles.hint}>
+              {showConfidenceHint ? (
+                <>
+                  Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).
+                </>
+              ) : (
+                <>Tip: one sentence is enough 🙂</>
               )}
             </div>
+          )}
 
-            <button
-              onClick={recording ? stopVoice : startVoice}
-              disabled={voiceDisabled && !recording}
-              style={styles.voiceBtn}
-              title={
-                awaitingBaseline || awaitingDailyConfidence
-                  ? "Voice is disabled for number-only prompts"
-                  : awaitingDailyProgress
-                  ? "Voice is disabled while daily check-in buttons are active"
-                  : "Send a voice message"
-              }
-            >
-              {recording ? "⏹ Stop" : "🎙️ Voice"}
-            </button>
+          <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
+            {loading ? "Sending…" : "Send"}
+          </button>
 
-            <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
-              {loading ? "Sending…" : "Send"}
-            </button>
-          </div>
+          {profile?.email ? (
+            <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
+              Email follow-ups enabled for: <b>{profile.email}</b> (sent when you’re away ~12h).
+            </div>
+          ) : (
+            <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
+              Tip: add an email in onboarding to enable 12-hour email follow-ups.
+            </div>
+          )}
         </div>
 
+        {/* RIGHT: Plans from this conversation */}
         <div className="conv-sidebar" style={styles.sidePanel}>
-          <ConversationPlansSidebarInline plans={convPlans} />
+          <ConversationPlansSidebar plans={convPlans} />
         </div>
       </div>
     </div>
