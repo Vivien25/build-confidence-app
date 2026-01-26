@@ -568,8 +568,7 @@ export default function Chat() {
       const maleHint = ["male", "david", "mark", "daniel", "alex", "fred", "tom", "guy"];
       const femHint = ["female", "samantha", "victoria", "karen", "zira", "tessa", "allison"];
 
-      const byHint = (hints) =>
-        pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
+      const byHint = (hints) => pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
 
       const vPicked = preferMale ? pick([byHint(maleHint), pool[0]]) : pick([byHint(femHint), pool[0]]);
       if (vPicked) u.voice = vPicked;
@@ -1059,7 +1058,16 @@ export default function Chat() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
 
-      const mr = new MediaRecorder(stream);
+      // ✅ Better browser compatibility (some browsers dislike audio/webm)
+      const preferredMime =
+        window.MediaRecorder?.isTypeSupported?.("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : window.MediaRecorder?.isTypeSupported?.("audio/webm")
+          ? "audio/webm"
+          : "";
+
+      const mr = preferredMime ? new MediaRecorder(stream, { mimeType: preferredMime }) : new MediaRecorder(stream);
+
       mediaRecorderRef.current = mr;
       audioChunksRef.current = [];
 
@@ -1076,6 +1084,22 @@ export default function Chat() {
           micStreamRef.current = null;
 
           const blob = new Blob(audioChunksRef.current, { type: mr.mimeType || "audio/webm" });
+
+          // ✅ Guard: empty recordings should not be sent
+          if (!blob || blob.size < 200) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: uid("msg"),
+                role: "assistant",
+                type: "text",
+                mode: "chat",
+                message: "I didn’t catch any audio. Please try again (and make sure your mic is working).",
+              },
+            ]);
+            return;
+          }
+
           await sendVoiceBlob(blob);
         } catch {
           // ignore
@@ -1133,8 +1157,8 @@ export default function Chat() {
       form.append("profile_json", JSON.stringify(profile || {}));
       form.append("audio", blob, "voice.webm");
 
+      // ✅ IMPORTANT: Do NOT set Content-Type manually (axios/browser will add the boundary)
       const res = await axios.post(`${API_BASE}/chat/voice`, form, {
-        headers: { "Content-Type": "multipart/form-data" },
         timeout: Math.max(AXIOS_TIMEOUT_MS, 60000),
       });
 
@@ -1172,7 +1196,7 @@ export default function Chat() {
           message:
             msg === "Request timed out."
               ? "Sorry — voice took too long to process. Try a shorter message."
-              : "Sorry — I couldn’t process that voice message. Please try again.",
+              : `Sorry — I couldn’t process that voice message. Please try again.\n(${msg})`,
         },
       ]);
     } finally {
