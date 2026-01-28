@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 
 # ✅ Explicit imports for Docker
-from backend.notify import router as notify_router
+
 from backend.routers.chat import router as chat_router
 from backend.routers.users import router as users_router
 
