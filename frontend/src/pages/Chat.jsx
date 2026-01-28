@@ -454,12 +454,8 @@ export default function Chat() {
           timeout: AXIOS_TIMEOUT_MS,
         });
 
-<<<<<<< HEAD
-        const hist = Array.isArray(res?.data?.messages) ? res.data.messages : [];
-=======
       const byHint = (hints) =>
         pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
->>>>>>> parent of 922c2fa... add audio debug
 
         const incoming = hist
           .map(historyRowToUiMessage)
@@ -943,9 +939,6 @@ ${edges}
     }
   };
 
-<<<<<<< HEAD
-  // Clear chat + conversation plans
-=======
   // -----------------------
   // Voice: record + send
   // -----------------------
@@ -1091,7 +1084,6 @@ ${edges}
     }
   }
 
->>>>>>> parent of 922c2fa... add audio debug
   const clearChat = () => {
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);

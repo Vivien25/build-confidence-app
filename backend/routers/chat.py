@@ -82,11 +82,8 @@ def transcribe_audio_file(path: str) -> str:
 
     try:
         if _whisper_impl == "openai":
-<<<<<<< HEAD
-=======
             # openai-whisper
             # result = {"text": "...", ...}
->>>>>>> parent of 922c2fa... add audio debug
             result = _whisper_model.transcribe(path)  # type: ignore
             text = (result.get("text") or "").strip()
             return text
@@ -111,14 +108,6 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
 
-<<<<<<< HEAD
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-=======
->>>>>>> parent of 922c2fa... add audio debug
 def _now_iso() -> str:
     return _now().isoformat()
 
@@ -300,11 +289,6 @@ def explicit_new_plan_request(user_text: str) -> bool:
     return _matches_any(user_text, _NEW_PLAN_PATTERNS)
 
 def plan_requested(user_text: str) -> bool:
-<<<<<<< HEAD
-    if is_greeting(user_text):
-        return False
-=======
->>>>>>> parent of 922c2fa... add audio debug
     return _matches_any(user_text, _PLAN_REQUEST_PATTERNS)
 
 def refine_requested(user_text: str) -> bool:
@@ -327,12 +311,6 @@ def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
     t = (user_text or "").lower()
 
-<<<<<<< HEAD
-    if is_greeting(user_text):
-        return "general"
-
-=======
->>>>>>> parent of 922c2fa... add audio debug
     if any(k in t for k in ["interview", "behavioral", "system design", "leetcode", "ml ops", "mle", "data engineer"]):
         return "interview_confidence"
     if any(k in t for k in ["work", "job", "boss", "coworker", "deadline", "productivity", "focus"]):
@@ -358,12 +336,6 @@ DISCOVERY_QUESTIONS = [
 ]
 
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
-<<<<<<< HEAD
-    if is_greeting(user_text):
-        return "CHAT", None
-
-=======
->>>>>>> parent of 922c2fa... add audio debug
     if skip_requested(user_text):
         return "CHAT", None
 
@@ -950,33 +922,8 @@ def process_chat_message(
     if user_text.lower() == "ping":
         return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
 
-<<<<<<< HEAD
-    topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
-
-    # ✅ inject due follow-up BEFORE we handle this message (so it shows in history too)
-    _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
-
-    # ✅ Simple dedupe: if same message repeats immediately, avoid double-processing
-    if state.get("history"):
-        last = state["history"][-1]
-        if last.get("role") == "user" and (last.get("text") or "").strip() == user_text:
-            return ChatResponse(
-                messages=[CoachMessage(text="(duplicate received) Got it — can you add one more detail so I can help?")],
-                ui=UIState(mode="CHAT", show_plan_sidebar=False),
-                effects=Effects(),
-                plan=None,
-            )
-
-    # save user message
-    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso(), "kind": "user"})
-    state["history"] = state["history"][-120:]
-
-    # schedule next follow-up
-    _schedule_followup(state)
-=======
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
     state["history"] = state["history"][-80:]
->>>>>>> parent of 922c2fa... add audio debug
 
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
