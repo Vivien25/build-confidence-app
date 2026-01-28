@@ -4,7 +4,7 @@ import json
 import re
 import traceback
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -28,17 +28,17 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 client = genai.Client(api_key=API_KEY)
 
 # ===========================
+# 12-hour follow-up config (Option B: in-app check-in)
+# ===========================
+FOLLOWUP_HOURS = int(os.getenv("FOLLOWUP_HOURS", "12"))
+
+# ===========================
 # Local Whisper (STT)
 # ===========================
-# Choose one:
-# 1) faster-whisper (recommended): pip install faster-whisper
-# 2) openai-whisper: pip install -U openai-whisper
-#
-# NOTE: Whisper decoding usually needs ffmpeg installed on the machine.
 WHISPER_BACKEND = os.getenv("WHISPER_BACKEND", "faster")  # "faster" | "openai"
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")        # e.g. tiny/base/small/medium/large-v3
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")       # cpu | cuda (if supported)
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")  # faster-whisper compute type
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")        # tiny/base/small/medium/large-v3
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")       # cpu | cuda
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
 _whisper_ready = False
 _whisper_impl = None
@@ -56,7 +56,6 @@ def _init_whisper_if_needed() -> None:
             _whisper_impl = "openai"
             _whisper_model = whisper.load_model(WHISPER_MODEL)
         else:
-            # default: faster-whisper
             from faster_whisper import WhisperModel  # type: ignore
             _whisper_impl = "faster"
             _whisper_model = WhisperModel(
@@ -76,10 +75,6 @@ def _init_whisper_if_needed() -> None:
 
 
 def transcribe_audio_file(path: str) -> str:
-    """
-    Transcribe an audio file using local Whisper.
-    Supports common formats (webm/wav/m4a/mp3), but ffmpeg may be required.
-    """
     _init_whisper_if_needed()
     if not _whisper_ready or _whisper_model is None:
         raise HTTPException(
@@ -89,12 +84,10 @@ def transcribe_audio_file(path: str) -> str:
 
     try:
         if _whisper_impl == "openai":
-            # openai-whisper
             result = _whisper_model.transcribe(path)  # type: ignore
             text = (result.get("text") or "").strip()
             return text
 
-        # faster-whisper
         segments, info = _whisper_model.transcribe(path)  # type: ignore
         parts = []
         for seg in segments:
@@ -122,8 +115,12 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return _now().isoformat()
 
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
@@ -160,8 +157,7 @@ def _get_user_bucket(all_state: Dict[str, Any], user_id: str) -> Dict[str, Any]:
 class ChatRequest(BaseModel):
     user_id: str = Field(..., description="Stable id (email, uuid, etc.)")
     message: str = Field(..., description="User message text")
-
-    coach: Optional[str] = None      # e.g. "mira" / "kai"
+    coach: Optional[str] = None
     profile: Optional[Dict[str, Any]] = None
     topic: Optional[str] = None
 
@@ -195,22 +191,41 @@ class VoiceChatResponse(BaseModel):
     transcript: str
     chat: ChatResponse
 
+
+class HistoryMessage(BaseModel):
+    role: str
+    text: str
+    ts: str
+    kind: Optional[str] = None
+
+
+class HistoryResponse(BaseModel):
+    topic: str
+    messages: List[HistoryMessage]
+
 # ===========================
 # State schema
 # ===========================
 DEFAULT_STATE = {
-    "mode": "CHAT",  # CHAT | PLAN_BUILD | CHECKIN (future)
-    "history": [],  # list[{role,text,ts}]
-    "metrics": {"confidence": {}},  # topic_key -> {baseline,last,updated_at}
+    "mode": "CHAT",
+    "history": [],  # list[{role,text,ts,kind?}]
+    "metrics": {"confidence": {}},
     "plan_build": {
-        "step": "DISCOVERY",  # DISCOVERY | DRAFT | REFINE
+        "step": "DISCOVERY",
         "topic": None,
         "discovery_questions_asked": 0,
         "discovery_answers": {},
         "active_plan_id": None,
         "locked": False,
     },
-    "plans": {},  # plan_id -> plan object
+    "plans": {},
+
+    # ✅ NEW: follow-up tracking (Option B: in-app check-in)
+    "followup": {
+        "pending_at": None,         # ISO UTC
+        "pending_for_ts": None,     # user message ts that scheduled this check-in
+        "last_sent_at": None,       # ISO UTC
+    },
 }
 
 
@@ -226,6 +241,15 @@ def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in DEFAULT_STATE["plan_build"].items():
         merged["plan_build"].setdefault(k, v)
     merged.setdefault("plans", {})
+    merged.setdefault("followup", {})
+    for k, v in DEFAULT_STATE["followup"].items():
+        merged["followup"].setdefault(k, v)
+
+    # normalize older history rows (kind missing)
+    for m in merged.get("history", []):
+        if isinstance(m, dict):
+            m.setdefault("kind", None)
+
     return merged
 
 # ===========================
@@ -300,7 +324,6 @@ def explicit_new_plan_request(user_text: str) -> bool:
 
 
 def plan_requested(user_text: str) -> bool:
-    # ✅ Important: do NOT treat greetings as plan requests
     if is_greeting(user_text):
         return False
     return _matches_any(user_text, _PLAN_REQUEST_PATTERNS)
@@ -330,7 +353,6 @@ def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
     t = (user_text or "").lower()
 
-    # ✅ If it's just a greeting, keep it general
     if is_greeting(user_text):
         return "general"
 
@@ -360,7 +382,6 @@ DISCOVERY_QUESTIONS = [
 
 
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
-    # ✅ Greeting should NEVER force plan mode
     if is_greeting(user_text):
         return "CHAT", None
 
@@ -451,7 +472,7 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
         picks += RESOURCE_CATALOG["data_engineering"]
     if any(k in t for k in ["system design", "architecture", "trade-off", "latency", "throughput", "reliability", "scalability"]):
         picks += RESOURCE_CATALOG["system_design"]
-    if any(k in t for k in ["k8s", "kubernetes", "helm", "pod", "deployment", "service mesh"]):
+    if any(k in t for k in ["k8s", "kubernetes", "helm", "pod", "service mesh"]):
         picks += RESOURCE_CATALOG["kubernetes"]
     if any(k in t for k in ["behavioral", "star", "mock interview", "interview", "tell me about yourself"]):
         picks += RESOURCE_CATALOG["interview"]
@@ -470,6 +491,71 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
         if len(out) >= max_items:
             break
     return out
+
+# ===========================
+# Follow-up (Option B): schedule + inject check-in message
+# ===========================
+def _parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _schedule_followup(state: Dict[str, Any]) -> None:
+    """
+    Schedule a check-in FOLLOWUP_HOURS from now, tied to the last user message ts.
+    """
+    fu = state.setdefault("followup", {})
+    now = _now()
+    fu["pending_at"] = (now + timedelta(hours=FOLLOWUP_HOURS)).isoformat()
+
+    last_user = next((m for m in reversed(state.get("history", [])) if m.get("role") == "user"), None)
+    fu["pending_for_ts"] = last_user.get("ts") if isinstance(last_user, dict) else None
+
+
+def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str], topic_key: str) -> bool:
+    """
+    If pending follow-up time is due AND user hasn't sent a new message since it was scheduled,
+    inject a coach message into history. Returns True if injected.
+    """
+    fu = state.get("followup") or {}
+    pending_at = _parse_iso(fu.get("pending_at"))
+    pending_for_ts = fu.get("pending_for_ts")
+
+    if not pending_at or not pending_for_ts:
+        return False
+
+    if _now() < pending_at:
+        return False
+
+    # If user sent a new message since scheduling, skip this follow-up
+    last_user = next((m for m in reversed(state.get("history", [])) if m.get("role") == "user"), None)
+    if not last_user or last_user.get("ts") != pending_for_ts:
+        fu["pending_at"] = None
+        fu["pending_for_ts"] = None
+        state["followup"] = fu
+        return False
+
+    coach_name = "Kai" if (coach_id or "").lower().strip() in ["kai", "male", "coach_kai"] else "Mira"
+    msg = (
+        f"Quick check-in 🌱 It’s been about {FOLLOWUP_HOURS} hours.\n"
+        f"How did it go on **{topic_key.replace('_', ' ')}**?\n"
+        "Tell me one thing you did (even small), and one thing that felt hard."
+    )
+
+    state.setdefault("history", []).append(
+        {"role": "coach", "text": msg, "ts": _now_iso(), "kind": "checkin_12h"}
+    )
+    state["history"] = state["history"][-120:]
+
+    fu["last_sent_at"] = _now_iso()
+    fu["pending_at"] = None
+    fu["pending_for_ts"] = None
+    state["followup"] = fu
+    return True
 
 # ===========================
 # Gemini helpers
@@ -616,17 +702,12 @@ def plan_to_mermaid(plan: Dict[str, Any]) -> str:
 # Mode handlers
 # ===========================
 def _coach_style(coach_id: Optional[str]) -> str:
-    """
-    Tiny style control to make Mira / Kai feel different in text.
-    Keep it subtle (your frontend does the voice pitch anyway).
-    """
     c = (coach_id or "").lower().strip()
     if c in ["kai", "male", "coach_kai"]:
         return (
             "You are Coach Kai (male). Friendly, direct, calm. "
             "Short sentences. Practical steps. Supportive but not overly bubbly."
         )
-    # default Mira
     return (
         "You are Coach Mira (female). Warm, encouraging, conversational. "
         "Short and natural. Practical steps. Gentle confidence-building tone."
@@ -801,7 +882,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
     user = (
         f"Plan title: {plan.get('title')}\n"
         f"Existing tasks:\n"
-        + "\n".join([f"- {t['text']}" for t in (plan.get('tasks') or [])][:12])
+        + "\n".join([f"- {t['text']}" for t in (plan.get("tasks") or [])][:12])
         + "\n\nUser request:\n"
         + user_text
     )
@@ -857,9 +938,6 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
     plan["updated_at"] = _now_iso()
     state["plans"][plan_id] = plan
 
-    mermaid = plan_to_mermaid(plan)
-    plan_link = f"/plans/{plan_id}"
-
     coach_text = (
         "Done — I updated your current plan (same plan, not a new one).\n"
         "Resources are attached under steps. What do you want to tackle *today*?"
@@ -869,7 +947,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
 
     return ChatResponse(
         messages=[CoachMessage(text=coach_text)],
-        ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid),
+        ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
         effects=Effects(updated_plan_id=plan_id),
         plan=plan,
     )
@@ -895,6 +973,11 @@ def process_chat_message(
     if user_text.lower() == "ping":
         return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
 
+    topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
+
+    # ✅ inject due follow-up BEFORE we handle this message (so it shows in history too)
+    _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
+
     # ✅ Simple dedupe: if same message repeats immediately, avoid double-processing
     if state.get("history"):
         last = state["history"][-1]
@@ -906,10 +989,13 @@ def process_chat_message(
                 plan=None,
             )
 
-    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
-    state["history"] = state["history"][-80:]
+    # save user message
+    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso(), "kind": "user"})
+    state["history"] = state["history"][-120:]
 
-    topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
+    # schedule next follow-up
+    _schedule_followup(state)
+
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
     mode, step = decide_mode_and_step(state, user_text, topic_key)
@@ -929,8 +1015,8 @@ def process_chat_message(
         resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
 
     if resp.messages:
-        state["history"].append({"role": "coach", "text": resp.messages[0].text, "ts": _now_iso()})
-        state["history"] = state["history"][-80:]
+        state["history"].append({"role": "coach", "text": resp.messages[0].text, "ts": _now_iso(), "kind": "coach"})
+        state["history"] = state["history"][-120:]
 
     bucket.clear()
     bucket.update(state)
@@ -952,6 +1038,31 @@ def chat(req: ChatRequest) -> ChatResponse:
     )
 
 # ===========================
+# History endpoint (Option B)
+# ===========================
+@router.get("/history", response_model=HistoryResponse)
+def chat_history(
+    user_id: str,
+    topic: Optional[str] = None,
+    coach: Optional[str] = None,
+) -> HistoryResponse:
+    all_state = _load_all_state()
+    bucket = _get_user_bucket(all_state, user_id)
+    state = _ensure_state_shape(bucket)
+
+    topic_key = normalize_topic_key(topic) or "general"
+
+    # ✅ inject due follow-up when user opens the app
+    _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
+
+    bucket.clear()
+    bucket.update(state)
+    _save_all_state(all_state)
+
+    msgs = [HistoryMessage(**m) for m in state.get("history", [])]
+    return HistoryResponse(topic=topic_key, messages=msgs)
+
+# ===========================
 # Voice endpoint (audio -> whisper -> chat)
 # ===========================
 @router.post("/voice", response_model=VoiceChatResponse)
@@ -969,10 +1080,8 @@ async def chat_voice(
         except Exception:
             profile = None
 
-    # Save to a temp file for whisper
     suffix = ""
     try:
-        # keep extension if present (helps ffmpeg sometimes)
         name = (audio.filename or "").lower()
         if "." in name:
             suffix = "." + name.split(".")[-1]
@@ -987,7 +1096,6 @@ async def chat_voice(
 
         transcript = transcribe_audio_file(tmp_path)
         transcript = (transcript or "").strip()
-
         if not transcript:
             transcript = "(Couldn’t detect speech)"
 
@@ -1001,7 +1109,6 @@ async def chat_voice(
         return VoiceChatResponse(transcript=transcript, chat=chat_resp)
 
     finally:
-        # best-effort cleanup
         try:
             if "tmp_path" in locals() and tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)

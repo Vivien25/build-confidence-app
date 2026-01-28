@@ -9,12 +9,6 @@ import { useNavigate } from "react-router-dom";
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const AXIOS_TIMEOUT_MS = Number(import.meta.env.VITE_CHAT_TIMEOUT_MS || 20000);
 
-// ✅ 12-hour follow-up (tab open)
-const TWELVE_HOURS_MS = 12 * 60 * 60 * 1000;
-
-// ✅ Keep backend "last active" fresh while tab is visible (prevents unwanted emails)
-const HEARTBEAT_MS = 5 * 60 * 1000; // 5 minutes
-
 mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
 
 // ---------- localStorage helpers (persistent) ----------
@@ -58,10 +52,6 @@ function uid(prefix = "id") {
 function todayStr() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-function nowMs() {
-  return Date.now();
 }
 
 function parseConfidence(input) {
@@ -187,7 +177,6 @@ function mapNeedToBackendTopic(needKey, focus, customNeedLabel) {
 
 /**
  * Convert backend plan -> UI plan object (robust)
- * Supports tasks OR steps OR items, and string steps.
  */
 function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
   const raw =
@@ -291,6 +280,53 @@ function ConversationPlansSidebar({ plans = [] }) {
   );
 }
 
+// ✅ Convert backend history rows into UI messages (text + 12h check-in buttons)
+function historyRowToUiMessage(h) {
+  const ts = h?.ts || new Date().toISOString();
+  const role = String(h?.role || "");
+  const text = String(h?.text || "");
+  const kind = h?.kind || null;
+
+  const backend_key = `${ts}|${role}|${kind || ""}|${text}`;
+
+  if (role === "user") {
+    return {
+      id: `h_${backend_key}`,
+      backend_key,
+      role: "user",
+      type: "text",
+      text,
+      ts,
+    };
+  }
+
+  // coach
+  if (kind === "checkin_12h") {
+    return {
+      id: `h_${backend_key}`,
+      backend_key,
+      role: "assistant",
+      type: "daily_progress",
+      kind: "daily_prompt",
+      mode: "coach",
+      message: text,
+      ts,
+      fromBackend: true,
+    };
+  }
+
+  return {
+    id: `h_${backend_key}`,
+    backend_key,
+    role: "assistant",
+    type: "text",
+    mode: "coach",
+    message: text,
+    ts,
+    fromBackend: true,
+  };
+}
+
 export default function Chat() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getProfile() || {});
@@ -308,7 +344,6 @@ export default function Chat() {
     avatar: userAvatar?.img,
   };
 
-  // ✅ Must be stable for email scheduling; your updated profile.js ensures this exists.
   const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
 
@@ -367,12 +402,6 @@ export default function Chat() {
   // UI state across navigation
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
 
-  // ✅ local activity timestamps for 12h timer
-  const lastActivityKey = `bc_last_activity_ts_${userId}_${focus}_${needSlug}`;
-
-  // ✅ prevent repeated 12h prompt in same session until user responds
-  const checkinShownSessionKey = `${uiKey}_12h_shown`;
-
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
   const [readyForBaseline, setReadyForBaseline] = useState(() => loadSession(`${uiKey}_readyBaseline`, false));
 
@@ -408,37 +437,50 @@ export default function Chat() {
     return awaitingBaseline || awaitingBaselineReason || awaitingDailyProgress || awaitingDailyConfidence;
   }
 
-  // ------------- email scheduler support: ping backend activity -------------
-  async function pingActivity(reason = "heartbeat") {
-    const email = profile?.email;
-    if (!email) return;
-
-    // Record locally for 12h timer
-    save(lastActivityKey, { ts: nowMs(), reason });
-
-    try {
-      await axios.post(
-        `${API_BASE}/notify/activity`,
-        {
-          user_id: userId,
-          email,
-          focus,
-          need_slug: needSlug,
-          need_label: currentNeedLabel(),
-        },
-        { timeout: AXIOS_TIMEOUT_MS }
-      );
-    } catch {
-      // ignore
-    }
-  }
-
-  // Load per-need chat messages
+  // ✅ Load local cached chat immediately (keeps plan cards), then sync in backend-injected messages
   useEffect(() => {
     setChatHydrated(false);
-    setMessages(loadSaved(chatKey, []));
+
+    const local = loadSaved(chatKey, []);
+    setMessages(Array.isArray(local) ? local : []);
     setChatHydrated(true);
-  }, [chatKey]);
+
+    // then sync from backend (Option B)
+    (async () => {
+      try {
+        const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
+        const res = await axios.get(`${API_BASE}/chat/history`, {
+          params: { user_id: userId, topic, coach: coachId },
+          timeout: AXIOS_TIMEOUT_MS,
+        });
+
+        const hist = Array.isArray(res?.data?.messages) ? res.data.messages : [];
+
+        const incoming = hist
+          .map(historyRowToUiMessage)
+          .filter((m) => m.role === "assistant" && (m.fromBackend || m.backend_key)); // only inject coach-side history
+
+        setMessages((prev) => {
+          const prevArr = Array.isArray(prev) ? prev : [];
+          const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
+
+          const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
+
+          if (toAdd.length === 0) return prevArr;
+          return [...prevArr, ...toAdd];
+        });
+      } catch {
+        // ignore
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatKey, userId, focus, needKey, customNeedLabel, coachId]);
+
+  // Persist chat (so plan cards still stay)
+  useEffect(() => {
+    save(chatKey, messages);
+    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [messages, chatKey]);
 
   // Load global plans
   useEffect(() => {
@@ -453,12 +495,6 @@ export default function Chat() {
     setConvPlans(Array.isArray(savedConv) ? savedConv : []);
     setConvPlansHydrated(true);
   }, [convPlansKey]);
-
-  // Persist chat
-  useEffect(() => {
-    save(chatKey, messages);
-    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
-  }, [messages, chatKey]);
 
   // Persist global plans
   useEffect(() => {
@@ -491,99 +527,15 @@ export default function Chat() {
   useEffect(() => saveSession(`${uiKey}_awaitDailyConfidence`, awaitingDailyConfidence), [uiKey, awaitingDailyConfidence]);
   useEffect(() => saveSession(`${uiKey}_backendUI`, backendUI), [uiKey, backendUI]);
 
-  // ✅ On chat open / focus/need change: ping activity once (helps email system)
+  // ✅ If we have an unanswered backend daily prompt at the end, force the UI into awaitingDailyProgress
   useEffect(() => {
-    // only if profile has email; pingActivity handles that
-    pingActivity("chat_open");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, focus, needSlug]);
-
-  // ✅ Heartbeat while tab visible (prevents emails while user is “there”)
-  useEffect(() => {
-    if (!hasUserSpoken) return;
-
-    let interval = null;
-
-    const start = () => {
-      if (document.visibilityState !== "visible") return;
-      if (interval) return;
-      // ping immediately, then every HEARTBEAT_MS
-      pingActivity("heartbeat");
-      interval = window.setInterval(() => pingActivity("heartbeat"), HEARTBEAT_MS);
-    };
-
-    const stop = () => {
-      if (interval) {
-        window.clearInterval(interval);
-        interval = null;
-      }
-    };
-
-    const onVis = () => {
-      if (document.visibilityState === "visible") start();
-      else stop();
-    };
-
-    start();
-    document.addEventListener("visibilitychange", onVis);
-
-    return () => {
-      stop();
-      document.removeEventListener("visibilitychange", onVis);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasUserSpoken, userId, focus, needSlug]);
-
-  // ✅ 12-hour follow-up in chat window (while tab open)
-  useEffect(() => {
-    if (!hasUserSpoken) return;
-
-    let timer = null;
-
-    const shown = loadSession(checkinShownSessionKey, false);
-    if (shown) return;
-
-    const last = loadSaved(lastActivityKey, null);
-    const lastTs = typeof last?.ts === "number" ? last.ts : null;
-
-    // If we have no activity timestamp yet, create one now (so timer can start)
-    const base = lastTs ?? nowMs();
-    if (!lastTs) save(lastActivityKey, { ts: base, reason: "init" });
-
-    const elapsed = nowMs() - base;
-    const remaining = Math.max(0, TWELVE_HOURS_MS - elapsed);
-
-    const show12hPrompt = () => {
-      // Do not stack prompts
-      if (anyPromptActive()) return;
-
-      // Mark shown (this session) so it doesn't repeat until user answers
-      saveSession(checkinShownSessionKey, true);
-
-      setAwaitingDailyProgress(true);
-
-      upsertSystemMessage(setMessages, {
-        id: `system_12h_${focus}_${needSlug}`,
-        role: "assistant",
-        type: "daily_progress",
-        kind: "daily_prompt",
-        mode: "coach",
-        message: `Quick check-in ⏰\nIt’s been about 12 hours.\nDid you get a chance to work on your **${currentNeedLabel()}** plan?`,
-      });
-    };
-
-    if (remaining === 0) {
-      show12hPrompt();
-      return;
+    const last = messages?.length ? messages[messages.length - 1] : null;
+    const shouldAwait = !!last && last.role === "assistant" && last.type === "daily_progress";
+    if (shouldAwait !== awaitingDailyProgress) {
+      setAwaitingDailyProgress(shouldAwait);
     }
-
-    timer = window.setTimeout(show12hPrompt, remaining);
-
-    return () => {
-      if (timer) window.clearTimeout(timer);
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasUserSpoken, userId, focus, needSlug, awaitingBaseline, awaitingBaselineReason, awaitingDailyProgress, awaitingDailyConfidence]);
+  }, [messages]);
 
   // Reset local UX gating when need changes
   useEffect(() => {
@@ -593,11 +545,8 @@ export default function Chat() {
     setAwaitingDailyConfidence(false);
     setReadyForBaseline(false);
 
-    // allow 12h check-in to show again in this session for a new need
-    saveSession(checkinShownSessionKey, false);
-
     setMessages((prev) =>
-      prev.filter(
+      (prev || []).filter(
         (m) =>
           !(
             m.type === "system" &&
@@ -613,16 +562,14 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
-  // Baseline + (daily-by-date) triggers (kept)
+  // Baseline triggers (kept)
   useEffect(() => {
     if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
 
-    // Avoid stacking with 12h prompt
     if (anyPromptActive()) return;
 
     const conf = loadSaved(confidenceKey, null);
-    const t = todayStr();
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
 
@@ -639,19 +586,6 @@ export default function Chat() {
         message: `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
       });
       return;
-    }
-
-    const lastChecked = String(conf?.lastCheckDate || "");
-    if (lastChecked !== t) {
-      setAwaitingDailyProgress(true);
-      upsertSystemMessage(setMessages, {
-        id: `system_daily_${focus}_${needSlug}`,
-        role: "assistant",
-        type: "daily_progress",
-        kind: "daily_prompt",
-        mode: "coach",
-        message: `Quick check-in 🌱\nDid you get a chance to work on your **${nLabel}** plan since last time?`,
-      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
@@ -680,11 +614,15 @@ export default function Chat() {
 
     setMessages((prev) => [
       ...prev,
-      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page." },
+      {
+        id: uid("msg"),
+        role: "assistant",
+        type: "text",
+        mode: "coach",
+        message: "Saved ✅ Added to this conversation and your All Plans page.",
+        ts: new Date().toISOString(),
+      },
     ]);
-
-    // activity ping (email system)
-    pingActivity("accept_plan");
   };
 
   const revisePlan = async () => {
@@ -696,6 +634,7 @@ export default function Chat() {
         type: "text",
         mode: "coach",
         message: "Sure — tell me what to change. (Examples: “make it shorter”, “focus on system design”, “replace step 3”, “more lightweight”.)",
+        ts: new Date().toISOString(),
       },
     ]);
   };
@@ -737,7 +676,14 @@ export default function Chat() {
           ...backendMessages
             .map((m) => String(m?.text || "").trim())
             .filter(Boolean)
-            .map((text) => ({ id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: text })),
+            .map((text) => ({
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: text,
+              ts: new Date().toISOString(),
+            })),
         ]);
       }
 
@@ -786,7 +732,10 @@ ${edges}
 
       setMessages((prev) => {
         if (alreadyHasRecentReachError(prev) && finalText.includes("couldn’t reach the coach")) return prev;
-        return [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: finalText }];
+        return [
+          ...prev,
+          { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: finalText, ts: new Date().toISOString() },
+        ];
       });
     }
   }
@@ -826,36 +775,49 @@ ${edges}
 
   const handleDailyProgress = async (didProgress) => {
     if (loading || sendingRef.current) return;
-
+  
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
-
+  
     setAwaitingDailyProgress(false);
-
-    // ✅ allow next 12h prompt in this session after user answers
-    saveSession(checkinShownSessionKey, false);
-
-    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: didProgress ? "Yes, I did." : "Not yet.", type: "text" }]);
-
-    // mark activity for both timer + email
-    pingActivity("daily_progress_answer");
-
-    if (didProgress) {
-      setAwaitingDailyConfidence(true);
-      upsertSystemMessage(setMessages, {
-        id: `system_daily_conf_${focus}_${needSlug}`,
-        role: "assistant",
-        type: "system",
-        kind: "daily_conf_prompt",
-        mode: "coach",
-        message: `Nice — that matters ✅\nOn the same 1–10 scale, what’s your confidence for **${nLabel}** right now?`,
-      });
-      return;
-    }
-
+  
+    // Show user's click in UI
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: uid("msg"),
+        role: "user",
+        text: didProgress ? "Yes, I did." : "Not yet.",
+        type: "text",
+        ts: new Date().toISOString(),
+      },
+    ]);
+  
+    // ✅ IMPORTANT: Tell backend right away, so follow-up logic knows user responded
     setLoading(true);
     sendingRef.current = true;
+  
     try {
+      if (didProgress) {
+        // This is intentionally short — it just updates backend history / follow-up state.
+        await callCoachBackend(
+          `Check-in update: I made progress on my "${nLabel}" (${fLabel}) plan since the last check-in.`
+        );
+  
+        // Continue your local UX: ask for confidence number
+        setAwaitingDailyConfidence(true);
+        upsertSystemMessage(setMessages, {
+          id: `system_daily_conf_${focus}_${needSlug}`,
+          role: "assistant",
+          type: "system",
+          kind: "daily_conf_prompt",
+          mode: "coach",
+          message: `Nice — that matters ✅\nOn the same 1–10 scale, what’s your confidence for **${nLabel}** right now?`,
+        });
+        return;
+      }
+  
+      // didProgress === false -> backend coaching + tiny next step
       await callCoachBackend(
         `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`
       );
@@ -864,7 +826,7 @@ ${edges}
       sendingRef.current = false;
     }
   };
-
+  
   const sendMessage = async () => {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
@@ -872,7 +834,14 @@ ${edges}
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)',
+          ts: new Date().toISOString(),
+        },
       ]);
       return;
     }
@@ -886,10 +855,7 @@ ${edges}
     if (!isGreeting(userText)) setHasUserSpoken(true);
     if (!readyForBaseline && userAskedForPlan(userText)) setReadyForBaseline(true);
 
-    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text" }]);
-
-    // ✅ activity ping (drives email scheduler + 12h timer)
-    pingActivity("user_message");
+    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text", ts: new Date().toISOString() }]);
 
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
@@ -908,7 +874,14 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+              ts: new Date().toISOString(),
+            },
           ]);
           return;
         }
@@ -929,9 +902,6 @@ ${edges}
           mode: "coach",
           message: `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\nWhat’s the main reason it feels like a ${level} (and not higher)?`,
         });
-
-        // baseline counts as activity
-        pingActivity("baseline_saved");
         return;
       }
 
@@ -940,7 +910,14 @@ ${edges}
         if (level == null) {
           setMessages((prev) => [
             ...prev,
-            { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6)." },
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+              ts: new Date().toISOString(),
+            },
           ]);
           return;
         }
@@ -948,10 +925,9 @@ ${edges}
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
 
-        // counts as activity
-        pingActivity("daily_confidence_saved");
-
-        await callCoachBackend(`My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`);
+        await callCoachBackend(
+          `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`
+        );
         return;
       }
 
@@ -968,10 +944,6 @@ ${edges}
     sessionStorage.removeItem(convPlansKey);
     setMessages([]);
     setConvPlans([]);
-    // reset 12h prompt for this session
-    saveSession(checkinShownSessionKey, false);
-    // record activity (optional)
-    pingActivity("clear_chat");
   };
 
   const styles = {
@@ -1282,15 +1254,9 @@ ${edges}
             {loading ? "Sending…" : "Send"}
           </button>
 
-          {profile?.email ? (
-            <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
-              Email follow-ups enabled for: <b>{profile.email}</b> (sent when you’re away ~12h).
-            </div>
-          ) : (
-            <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
-              Tip: add an email in onboarding to enable 12-hour email follow-ups.
-            </div>
-          )}
+          <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
+            In-app check-ins: if you’re away for ~12 hours, the coach will drop a quick progress check here when you come back.
+          </div>
         </div>
 
         {/* RIGHT: Plans from this conversation */}
