@@ -454,7 +454,12 @@ export default function Chat() {
           timeout: AXIOS_TIMEOUT_MS,
         });
 
+<<<<<<< HEAD
         const hist = Array.isArray(res?.data?.messages) ? res.data.messages : [];
+=======
+      const byHint = (hints) =>
+        pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
+>>>>>>> parent of 922c2fa... add audio debug
 
         const incoming = hist
           .map(historyRowToUiMessage)
@@ -938,7 +943,155 @@ ${edges}
     }
   };
 
+<<<<<<< HEAD
   // Clear chat + conversation plans
+=======
+  // -----------------------
+  // Voice: record + send
+  // -----------------------
+  async function startVoice() {
+    if (loading || sendingRef.current || recording) return;
+    if (awaitingDailyProgress) return;
+
+    // If user is in a strict numeric prompt, voice isn't useful
+    if (awaitingBaseline || awaitingDailyConfidence) return;
+
+    // If custom need label missing, same as text
+    if (needKey === "custom" && !customNeedLabel.trim()) {
+      setMessages((prev) => [
+        ...prev,
+        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
+      ]);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      audioChunksRef.current = [];
+
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      mr.onstop = async () => {
+        try {
+          // stop mic tracks
+          try {
+            micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+          } catch {}
+          micStreamRef.current = null;
+
+          const blob = new Blob(audioChunksRef.current, { type: mr.mimeType || "audio/webm" });
+          await sendVoiceBlob(blob);
+        } catch {
+          // ignore
+        } finally {
+          audioChunksRef.current = [];
+          mediaRecorderRef.current = null;
+        }
+      };
+
+      mr.start();
+      setRecording(true);
+    } catch {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: "I can’t access your microphone. Please allow mic permission in the browser settings, then try again.",
+        },
+      ]);
+    }
+  }
+
+  function stopVoice() {
+    if (!recording) return;
+    setRecording(false);
+    try {
+      mediaRecorderRef.current?.stop();
+    } catch {
+      // ensure mic off
+      try {
+        micStreamRef.current?.getTracks?.().forEach((t) => t.stop());
+      } catch {}
+      micStreamRef.current = null;
+    }
+  }
+
+  async function sendVoiceBlob(blob) {
+    const mySeq = ++reqSeqRef.current;
+    const topic = mapNeedToBackendTopic(needKey, focus, customNeedLabel);
+
+    const tempUserMsgId = uid("voice_user");
+    setMessages((prev) => [...prev, { id: tempUserMsgId, role: "user", type: "text", text: "🎙️ (processing voice…)" }]);
+
+    setLoading(true);
+    sendingRef.current = true;
+
+    try {
+      const form = new FormData();
+      form.append("user_id", userId);
+      form.append("coach", coachId); // backend accepts mira/kai too
+      form.append("topic", topic);
+      form.append("profile_json", JSON.stringify(profile || {}));
+      form.append("audio", blob, "voice.webm");
+
+      const res = await axios.post(`${API_BASE}/chat/voice`, form, {
+        headers: { "Content-Type": "multipart/form-data" },
+        timeout: Math.max(AXIOS_TIMEOUT_MS, 60000),
+      });
+
+      if (mySeq !== reqSeqRef.current) return;
+
+      const transcript = String(res.data?.transcript || "").trim() || "(Voice message)";
+      updateMessageById(setMessages, tempUserMsgId, { text: transcript });
+
+      const chat = res.data?.chat || {};
+      const { lastAssistantText } = applyBackendChatResponse(chat);
+
+      // Speak only for voice flows
+      if (lastAssistantText) {
+        // Ensure some browsers have voices loaded (best effort)
+        if (!voicesReady) {
+          try {
+            window.speechSynthesis.getVoices?.();
+          } catch {}
+        }
+        speakCoach(lastAssistantText);
+      }
+    } catch (err) {
+      if (mySeq !== reqSeqRef.current) return;
+
+      const msg = getAxiosErrorMessage(err);
+      updateMessageById(setMessages, tempUserMsgId, { text: "🎙️ (voice failed to send)" });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "chat",
+          message:
+            msg === "Request timed out."
+              ? "Sorry — voice took too long to process. Try a shorter message."
+              : "Sorry — I couldn’t process that voice message. Please try again.",
+        },
+      ]);
+    } finally {
+      setLoading(false);
+      sendingRef.current = false;
+    }
+  }
+
+>>>>>>> parent of 922c2fa... add audio debug
   const clearChat = () => {
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);

@@ -44,7 +44,6 @@ _whisper_ready = False
 _whisper_impl = None
 _whisper_model = None
 
-
 def _init_whisper_if_needed() -> None:
     global _whisper_ready, _whisper_impl, _whisper_model
     if _whisper_ready:
@@ -73,7 +72,6 @@ def _init_whisper_if_needed() -> None:
         _whisper_impl = None
         _whisper_model = None
 
-
 def transcribe_audio_file(path: str) -> str:
     _init_whisper_if_needed()
     if not _whisper_ready or _whisper_model is None:
@@ -84,6 +82,11 @@ def transcribe_audio_file(path: str) -> str:
 
     try:
         if _whisper_impl == "openai":
+<<<<<<< HEAD
+=======
+            # openai-whisper
+            # result = {"text": "...", ...}
+>>>>>>> parent of 922c2fa... add audio debug
             result = _whisper_model.transcribe(path)  # type: ignore
             text = (result.get("text") or "").strip()
             return text
@@ -99,13 +102,7 @@ def transcribe_audio_file(path: str) -> str:
     except Exception as e:
         print("❌ Whisper transcription failed:", repr(e))
         traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Whisper transcription error: {repr(e)}. "
-                "If this is a decode error, install ffmpeg on the server."
-            ),
-        )
+        raise HTTPException(status_code=500, detail=f"Whisper transcription error: {repr(e)}")
 
 # ===========================
 # Tiny JSON-file state store
@@ -114,14 +111,16 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
 
+<<<<<<< HEAD
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+=======
+>>>>>>> parent of 922c2fa... add audio debug
 def _now_iso() -> str:
     return _now().isoformat()
-
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
     try:
@@ -131,20 +130,16 @@ def _safe_read_json(path: Path, fallback: Any) -> Any:
     except Exception:
         return fallback
 
-
 def _safe_write_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
-
 def _load_all_state() -> Dict[str, Any]:
     return _safe_read_json(STATE_FILE, {})
 
-
 def _save_all_state(all_state: Dict[str, Any]) -> None:
     _safe_write_json(STATE_FILE, all_state)
-
 
 def _get_user_bucket(all_state: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     if user_id not in all_state:
@@ -161,11 +156,9 @@ class ChatRequest(BaseModel):
     profile: Optional[Dict[str, Any]] = None
     topic: Optional[str] = None
 
-
 class CoachMessage(BaseModel):
     role: str = "coach"
     text: str
-
 
 class UIState(BaseModel):
     mode: str
@@ -173,19 +166,16 @@ class UIState(BaseModel):
     plan_link: Optional[str] = None
     mermaid: Optional[str] = None
 
-
 class Effects(BaseModel):
     saved_confidence: bool = False
     created_plan_id: Optional[str] = None
     updated_plan_id: Optional[str] = None
-
 
 class ChatResponse(BaseModel):
     messages: List[CoachMessage]
     ui: UIState
     effects: Effects
     plan: Optional[Dict[str, Any]] = None
-
 
 class VoiceChatResponse(BaseModel):
     transcript: str
@@ -228,7 +218,6 @@ DEFAULT_STATE = {
     },
 }
 
-
 def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     merged = json.loads(json.dumps(DEFAULT_STATE))
     for k, v in state.items():
@@ -255,11 +244,6 @@ def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
 # ===========================
 # Intent / Topic router
 # ===========================
-_GREET_PATTERNS = [
-    r"^(hi|hello|hey|hiya|yo)\b[!.\s]*$",
-    r"^(good\s*(morning|afternoon|evening))\b[!.\s]*$",
-]
-
 _NEW_PLAN_PATTERNS = [
     r"\bnew plan\b",
     r"\bcreate a new plan\b",
@@ -308,38 +292,29 @@ _SHOW_PLAN_PATTERNS = [
     r"\bopen the plan\b",
 ]
 
-
 def _matches_any(text: str, patterns: List[str]) -> bool:
     t = (text or "").lower()
     return any(re.search(p, t) for p in patterns)
 
-
-def is_greeting(user_text: str) -> bool:
-    t = (user_text or "").strip().lower()
-    return any(re.search(p, t) for p in _GREET_PATTERNS)
-
-
 def explicit_new_plan_request(user_text: str) -> bool:
     return _matches_any(user_text, _NEW_PLAN_PATTERNS)
 
-
 def plan_requested(user_text: str) -> bool:
+<<<<<<< HEAD
     if is_greeting(user_text):
         return False
+=======
+>>>>>>> parent of 922c2fa... add audio debug
     return _matches_any(user_text, _PLAN_REQUEST_PATTERNS)
-
 
 def refine_requested(user_text: str) -> bool:
     return _matches_any(user_text, _REFINE_PATTERNS)
 
-
 def skip_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SKIP_PATTERNS)
 
-
 def show_plan_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SHOW_PLAN_PATTERNS)
-
 
 def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     if not topic:
@@ -349,13 +324,15 @@ def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     t = re.sub(r"_+", "_", t).strip("_")
     return t or None
 
-
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
     t = (user_text or "").lower()
 
+<<<<<<< HEAD
     if is_greeting(user_text):
         return "general"
 
+=======
+>>>>>>> parent of 922c2fa... add audio debug
     if any(k in t for k in ["interview", "behavioral", "system design", "leetcode", "ml ops", "mle", "data engineer"]):
         return "interview_confidence"
     if any(k in t for k in ["work", "job", "boss", "coworker", "deadline", "productivity", "focus"]):
@@ -380,11 +357,13 @@ DISCOVERY_QUESTIONS = [
     "What’s the main target: ML Ops / Data Engineering / both? (One word is fine.)",
 ]
 
-
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
+<<<<<<< HEAD
     if is_greeting(user_text):
         return "CHAT", None
 
+=======
+>>>>>>> parent of 922c2fa... add audio debug
     if skip_requested(user_text):
         return "CHAT", None
 
@@ -460,7 +439,6 @@ RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
         {"title": "System design primer (GitHub)", "url": "https://github.com/donnemartin/system-design-primer", "type": "repo"},
     ],
 }
-
 
 def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
     t = (task_text or "").lower()
@@ -586,6 +564,10 @@ def gemini_text(system: str, user: str) -> str:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gemini error: {repr(e)}")
 
+@router.get("/debug/ping-gemini")
+def ping_gemini():
+    txt = gemini_text("Reply with exactly the word OK.", "ping")
+    return {"ok": True, "model": GEMINI_MODEL, "reply": txt}
 
 def extract_bullets(text: str, max_items: int = 10) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
@@ -685,7 +667,6 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
     }
     return plan
 
-
 def plan_to_mermaid(plan: Dict[str, Any]) -> str:
     title = (plan.get("title") or "Plan").replace('"', "'")
     tasks = plan.get("tasks") or []
@@ -712,7 +693,6 @@ def _coach_style(coach_id: Optional[str]) -> str:
         "You are Coach Mira (female). Warm, encouraging, conversational. "
         "Short and natural. Practical steps. Gentle confidence-building tone."
     )
-
 
 def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool, coach_id: Optional[str]) -> ChatResponse:
     pb = state["plan_build"]
@@ -766,7 +746,6 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
         plan=None,
     )
 
-
 def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
     pb["topic"] = topic_key
@@ -794,7 +773,6 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
         effects=Effects(),
         plan=None,
     )
-
 
 def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
@@ -842,7 +820,6 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
         effects=Effects(created_plan_id=plan["id"]),
         plan=plan,
     )
-
 
 def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
@@ -973,6 +950,7 @@ def process_chat_message(
     if user_text.lower() == "ping":
         return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
 
+<<<<<<< HEAD
     topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
 
     # ✅ inject due follow-up BEFORE we handle this message (so it shows in history too)
@@ -995,6 +973,10 @@ def process_chat_message(
 
     # schedule next follow-up
     _schedule_followup(state)
+=======
+    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
+    state["history"] = state["history"][-80:]
+>>>>>>> parent of 922c2fa... add audio debug
 
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
