@@ -57,6 +57,7 @@ export default function Onboarding() {
         avatar,
         coachVoice: selectedCoach === "kai" ? "male" : "female",
         coachAvatar: selectedCoach,
+        coachId: selectedCoach,
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -72,6 +73,7 @@ export default function Onboarding() {
         avatar,
         coachVoice: selectedCoach === "kai" ? "male" : "female",
         coachAvatar: selectedCoach,
+        coachId: selectedCoach,
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });

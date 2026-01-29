@@ -18,3 +18,9 @@ export const coachAvatars = {
   mira: { label: "Mira", img: miraImg },
   kai: { label: "Kai", img: kaiImg },
 };
+
+// Backwards compatibility for existing pages (e.g. Chat.jsx)
+export const COACHES = {
+  mira: { id: "mira", name: coachAvatars.mira.label, avatar: coachAvatars.mira.img },
+  kai: { id: "kai", name: coachAvatars.kai.label, avatar: coachAvatars.kai.img },
+};

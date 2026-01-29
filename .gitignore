@@ -14,3 +14,15 @@ backend/data/user_state.json
 # Frontend build artifacts
 node_modules/
 dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# DB
+*.db
+*.sqlite
+
+# Editor
+.vscode/
+.idea/

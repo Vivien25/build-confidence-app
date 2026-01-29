@@ -9,4 +9,5 @@ apscheduler
 sqlalchemy
 email-validator
 faster-whisper
-
+edge-tts
+aiofiles

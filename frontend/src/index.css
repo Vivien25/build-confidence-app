@@ -85,3 +85,33 @@ button:focus-visible {
     display: none !important; /* sidebars hidden on mobile; use /plans page */
   }
 }
+
+/* Mic button animations */
+@keyframes pulse-red {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+  70% { transform: scale(1.1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.mic-recording {
+  animation: pulse-red 1.5s infinite;
+  background-color: #ef4444 !important; /* red-500 */
+  color: white !important;
+  border-color: #ef4444 !important;
+}
+
+.mic-btn-base {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid #e5e7eb;
+  background-color: white; /* or your theme bg */
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.mic-btn-base:hover {
+  background-color: #f3f4f6;
+}

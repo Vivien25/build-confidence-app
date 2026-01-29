@@ -11,58 +11,90 @@ const VIDEO_URLS = {
 export default function IntroVideo() {
   const navigate = useNavigate();
   const videoRef = useRef(null);
-  const [isMuted, setIsMuted] = useState(true);
+
+  // Default to sound ON (isMuted = false)
+  const [isMuted, setIsMuted] = useState(false);
+  const [timeLeft, setTimeLeft] = useState(0);
+  const [duration, setDuration] = useState(0);
 
   const profile = getProfile() || {};
-  const coachId = profile?.coachId || "mira";
+  // Use coachId or fallback to coachAvatar, then default to mira
+  const coachId = profile?.coachId || profile?.coachAvatar || "mira";
 
   const videoSrc = useMemo(() => {
     return VIDEO_URLS[coachId] || VIDEO_URLS.mira;
   }, [coachId]);
 
   const goNext = () => {
-    navigate("/onboarding");
+    navigate("/focus");
   };
 
-  // Go to onboarding when video ends
+  const toggleMute = () => {
+    if (videoRef.current) {
+      videoRef.current.muted = !videoRef.current.muted;
+      setIsMuted(videoRef.current.muted);
+    }
+  };
+
+  // Video functionality
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
     const handleEnded = () => goNext();
-    video.addEventListener("ended", handleEnded);
+    const handleTimeUpdate = () => {
+      if (video.duration) {
+        setDuration(video.duration);
+        setTimeLeft(Math.max(0, video.duration - video.currentTime));
+      }
+    };
+    const handleLoadedMetadata = () => {
+      setDuration(video.duration);
+      setTimeLeft(video.duration);
+    };
 
-    return () => video.removeEventListener("ended", handleEnded);
+    video.addEventListener("ended", handleEnded);
+    video.addEventListener("timeupdate", handleTimeUpdate);
+    video.addEventListener("loadedmetadata", handleLoadedMetadata);
+
+    return () => {
+      video.removeEventListener("ended", handleEnded);
+      video.removeEventListener("timeupdate", handleTimeUpdate);
+      video.removeEventListener("loadedmetadata", handleLoadedMetadata);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ✅ If coach changes (user goes back and picks another coach),
-  // reset mute + restart the video correctly
+  // Handle source change
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
 
-    setIsMuted(true);
+    // Start muted to ensure autoplay works
     video.muted = true;
+    setIsMuted(true);
 
-    // force reload to ensure new src plays
     video.load();
-    video.play().catch(() => {});
+    video.play()
+      .then(() => {
+        // Once playing, try to unmute
+        video.muted = false;
+        setIsMuted(false);
+      })
+      .catch((err) => {
+        console.warn("Autoplay with sound blocked, keeping muted for now.", err);
+        // Fallback: stay muted if blocked
+        video.muted = true;
+        setIsMuted(true);
+      });
   }, [videoSrc]);
 
-  // Enable sound after user interaction (required by browsers)
-  const enableSound = async () => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    video.muted = false;
-    setIsMuted(false);
-
-    try {
-      await video.play(); // required for iOS / Safari
-    } catch (err) {
-      console.log("Play blocked:", err);
-    }
+  // Format time (MM:SS)
+  const formatTime = (seconds) => {
+    if (!seconds) return "0:00";
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
   return (
@@ -78,17 +110,25 @@ export default function IntroVideo() {
         style={styles.video}
       />
 
-      {/* Tap to enable sound */}
-      {isMuted && (
-        <button style={styles.soundBtn} onClick={enableSound}>
-          🔊 Tap for sound
+      {/* Controls Container */}
+      <div style={styles.controlsContainer}>
+        {/* Skip button at main position */}
+        <button style={styles.skipBtn} onClick={goNext}>
+          Skip
         </button>
-      )}
 
-      {/* Skip button */}
-      <button style={styles.skipBtn} onClick={goNext}>
-        Skip
-      </button>
+        {/* Mute/Unmute under Skip */}
+        <div style={styles.subControls}>
+          {/* Countdown */}
+          <span style={styles.timer}>
+            {formatTime(timeLeft)}
+          </span>
+
+          <button style={styles.iconBtn} onClick={toggleMute}>
+            {isMuted ? "🔇 Unmute" : "🔊 Mute"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -105,33 +145,56 @@ const styles = {
     inset: 0,
     width: "100%",
     height: "100%",
-    objectFit: "contain", // change to "cover" if you want full bleed
+    objectFit: "contain",
     objectPosition: "center",
   },
-  soundBtn: {
-    position: "absolute",
-    left: 20,
-    bottom: 20,
-    padding: "10px 14px",
-    borderRadius: 10,
-    border: "none",
-    background: "rgba(0,0,0,0.6)",
-    color: "#fff",
-    fontSize: 14,
-    cursor: "pointer",
-    zIndex: 2,
-  },
-  skipBtn: {
+  controlsContainer: {
     position: "absolute",
     right: 20,
     top: 20,
-    padding: "10px 14px",
-    borderRadius: 10,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end", // Align to right
+    gap: 8,
+    zIndex: 10,
+  },
+  skipBtn: {
+    padding: "10px 20px",
+    borderRadius: 20,
     border: "none",
     background: "rgba(0,0,0,0.6)",
     color: "#fff",
-    fontSize: 14,
+    fontSize: 16,
+    fontWeight: "bold",
     cursor: "pointer",
-    zIndex: 2,
+    backdropFilter: "blur(4px)",
+    transition: "background 0.2s",
+  },
+  subControls: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    background: "rgba(0,0,0,0.4)",
+    padding: "6px 12px",
+    borderRadius: 12,
+    backdropFilter: "blur(4px)",
+  },
+  timer: {
+    color: "#fff",
+    fontSize: 13,
+    fontFamily: "monospace",
+    fontWeight: 600,
+    minWidth: "32px",
+    textAlign: "right",
+  },
+  iconBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#fff",
+    fontSize: 13,
+    cursor: "pointer",
+    fontWeight: 500,
+    padding: 0,
+    opacity: 0.9,
   },
 };

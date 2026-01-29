@@ -9,8 +9,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
+import edge_tts
+import uuid
+
+# debug
+from backend.debug_logger import log_debug
 
 from google import genai
 from google.genai import types
@@ -107,6 +113,9 @@ def transcribe_audio_file(path: str) -> str:
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 def _now_iso() -> str:
     return _now().isoformat()
@@ -510,31 +519,108 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
 # ===========================
 # Gemini helpers
 # ===========================
+# ===========================
+# Gemini helpers (with Fallback)
+# ===========================
+# Verified available models from API:
+# - gemini-2.5-flash
+# - gemini-2.5-pro
+# - gemini-2.0-flash
+
+MODEL_PREFERENCE = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+]
+
 def gemini_text(system: str, user: str) -> str:
-    try:
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[
-                types.Content(
+    # Try models in order
+    last_error = None
+    
+    # Prepend the requested env model if it's different and valid
+    candidates = list(MODEL_PREFERENCE)
+    if GEMINI_MODEL and GEMINI_MODEL not in candidates:
+        candidates.insert(0, GEMINI_MODEL)
+
+    for model_name in candidates:
+        try:
+            log_debug(f"🤖 Calling Gemini with model: {model_name}")
+            resp = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]
+                    )
+                ],
+                config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
+            )
+            text = getattr(resp, "text", None)
+            if text:
+                return text.strip()
+            
+            # Check candidates
+            if getattr(resp, "candidates", None):
+                parts = resp.candidates[0].content.parts
+                return "".join([p.text for p in parts if getattr(p, "text", None)]).strip()
+            
+            # If we got here, empty response but no exception? treat as failure to fallback
+            log_debug(f"⚠️ Empty response from {model_name}, trying next...")
+            
+        except Exception as e:
+            log_debug(f"⚠️ Model {model_name} failed: {repr(e)}")
+            last_error = e
+            # continue loop
+            
+    # If all failed
+    log_debug("❌ ALL GEMINI MODELS FAILED")
+    raise HTTPException(status_code=500, detail=f"Gemini error (all models failed): {repr(last_error)}")
+
+# ... (rest of file) ...
+
+# ===========================
+# Voice endpoint (audio -> whisper -> chat)
+# ===========================
+
+def transcribe_with_gemini(path: str, mime_type: str = "audio/webm") -> str:
+    """Fallback STT using verified available models"""
+    models_to_try = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash"
+    ]
+    
+    with open(path, "rb") as f:
+        audio_data = f.read()
+    
+    # Ensure mime_type is valid for Gemini. 
+    log_debug(f"🎤 Transcribing {len(audio_data)} bytes type={mime_type}...")
+
+    last_err = None
+    for m in models_to_try:
+        try:
+            log_debug(f"   Attempts using model={m}...")
+            resp = client.models.generate_content(
+                model=m,
+                contents=[
+                    types.Content(
                     role="user",
-                    parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]
-                )
-            ],
-            config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
-        )
-        text = getattr(resp, "text", None)
-        if text:
-            return text.strip()
-        if getattr(resp, "candidates", None):
-            parts = resp.candidates[0].content.parts
-            return "".join([p.text for p in parts if getattr(p, "text", None)]).strip()
-        return ""
-    except Exception as e:
-        print("❌ GEMINI CALL FAILED")
-        print("Model:", GEMINI_MODEL)
-        print("Error:", repr(e))
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Gemini error: {repr(e)}")
+                    parts=[
+                        types.Part.from_bytes(data=audio_data, mime_type=mime_type),
+                        types.Part(text="Transcribe this audio verbatim. Output ONLY the transcription text. If no speech, output nothing.")
+                    ]
+                )],
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
+            text = (resp.text or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            log_debug(f"   ❌ Failed with {m}: {e}")
+            last_err = e
+            
+    log_debug(f"❌ All Gemini STT models failed. Last error: {last_err}")
+    return ""
 
 @router.get("/debug/ping-gemini")
 def ping_gemini():
@@ -654,68 +740,185 @@ def plan_to_mermaid(plan: Dict[str, Any]) -> str:
 # ===========================
 # Mode handlers
 # ===========================
-def _coach_style(coach_id: Optional[str]) -> str:
-    c = (coach_id or "").lower().strip()
-    if c in ["kai", "male", "coach_kai"]:
+# ===========================
+# Handover & Context
+# ===========================
+def _get_coach_transition_context(state: Dict[str, Any], current_coach_name: str) -> str:
+    """
+    Check if the user has switched coaches since the last interaction.
+    Returns a context string for the system prompt if a switch occurred.
+    """
+    meta = state.setdefault("metadata", {})
+    last_coach = meta.get("last_coach_name")
+    
+    # Update for next time
+    meta["last_coach_name"] = current_coach_name
+    
+    if last_coach and last_coach.lower() != current_coach_name.lower():
         return (
-            "You are Coach Kai (male). Friendly, direct, calm. "
-            "Short sentences. Practical steps. Supportive but not overly bubbly."
+            f"CONTEXT: The user was previously coached by 'Coach {last_coach}'. "
+            f"You are now 'Coach {current_coach_name}'. "
+            f"The user has an existing plan. "
+            "CRITICAL: You MUST acknowledge this transition immediately. "
+            f"Say something like: 'I see you started this plan with my colleague Coach {last_coach}. "
+            "I'm here to help you continue that progress without interruption.' "
+            "Ensure them that their plan is safe and you are up to speed.\n"
         )
-    return (
-        "You are Coach Mira (female). Warm, encouraging, conversational. "
-        "Short and natural. Practical steps. Gentle confidence-building tone."
-    )
+    return ""
 
-def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool, coach_id: Optional[str]) -> ChatResponse:
+def _build_system_prompt(
+    state: Dict[str, Any], 
+    profile: Dict[str, Any], 
+    coach_name: str, 
+    topic_key: str, 
+    transition_context: str
+) -> str:
+    first_name = profile.get("name", "Friend").split()[0]
+    focus = profile.get("focus", "work")
+    
+    # Check if there's an active plan
     pb = state["plan_build"]
-    plan_id = pb.get("active_plan_id") if pb.get("topic") == topic_key else None
-    has_plan = bool(plan_id) and plan_id in state["plans"]
+    active_plan_id = pb.get("active_plan_id")
+    current_plan_summary = "None"
+    if active_plan_id and active_plan_id in state["plans"]:
+        p = state["plans"][active_plan_id]
+        tasks = [t["text"] for t in p.get("tasks", [])[:3]]
+        current_plan_summary = f"Title: {p.get('title')}, Goal: {p.get('goal')}, Top tasks: {'; '.join(tasks)}"
 
-    if show_plan_requested(user_text) and has_plan:
-        plan = state["plans"][plan_id]
-        state["mode"] = "CHAT"
-        return ChatResponse(
-            messages=[CoachMessage(text="Here’s your current plan. Want to work on step 1, or revise anything?")],
-            ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
-            effects=Effects(saved_confidence=saved_conf),
-            plan=plan,
-        )
+    # Context signals
+    # We can infer 'returning moment' if it's been > X hours, but for now we'll rely on recent history length
+    history = state.get("history", [])
+    is_returning_moment = len(history) > 0 and (datetime.fromisoformat(_now_iso()) - datetime.fromisoformat(history[-1]["ts"])).total_seconds() > 3600 * 6
+    
+    # Helper to guess if plan switched recently (simple heuristic)
+    plan_switched = False # Placeholder logic
 
-    system = (
-        f"{_coach_style(coach_id)}\n\n"
-        "You are a helpful coach. Keep responses short and natural. "
-        "Do NOT create a plan unless user asks for one. "
-        "If user is choosing a specific step from an existing plan, help them execute it with 3–6 concrete substeps. "
-        "Avoid repeating the plan."
+    prompt = (
+        f"CORE MISSION: Your primary goal is to build the user's CONFIDENCE. Speak to {first_name} directly by first name occasionally.\n"
+        f"You are Coach {coach_name}, an expert life coach and empathetic friend.\n"
+        "1. ADAPT YOUR ROLE based on the User's focus:\n"
+        "   - If focus='work': Be a supportive Career & Leadership Coach.\n"
+        "   - If focus='social': Be a Social Confidence & Connection Expert.\n"
+        "   - Always maintain a warm, 'human' tone (no robotic summaries).\n"
+        "2. THE CONFIDENCE-FIRST PROTOCOL:\n"
+        "   - **Initial Assessment**: When a user shares a new concern or challenge, your first priority is to understand their mindset. ASK: 'On a scale of 1-10, how confident do you feel about handling this right now?'\n"
+        "   - **Periodic Check-ins**: If the user is working on a plan, ask about their confidence level regularly to see if the steps are helping or causing overwhelm.\n"
+        "   - **ADAPTIVE PACING**: Automatically adjust current plan steps in your 'plan' output based on feedback:\n"
+        "     - If confidence is LOW (<5) or user feels overwhelmed: Simplify the next steps into tiny, microscopic wins. Reduce the 'pace'.\n"
+        "     - If confidence is HIGH (>8): Challenge them more. Increase the 'pace' or add a growth-oriented goal.\n"
+        "3. PLAN CREATION & DURATION (CRITICAL):\n"
+        "   - **NEVER** output a 'plan' array in your JSON until the user has EXPLICITLY agreed to a specific duration (e.g., 'Yes, let's do 3 days').\n"
+        "   - If the user has NOT agreed to a duration yet, your 'plan' array MUST be empty [].\n"
+        "   - Instead, Ask: 'How long do you think we should focus on this? Maybe 3 days for a quick win, or a week for deeper habit building?'\n"
+        "   - **NO REPETITION**: Do not show the same plan steps again if the user is asking a question or negotiating details. Only show the plan when it is finalized or explicitly requested.\n"
+        "   - **FORMATTING**: If a plan is agreed (e.g. 7 days), provide exactly 7 strings in the 'plan' array.\n"
+        "     - Each string must be a COMPLETE instruction (e.g. 'Day 1: Journal for 5 mins').\n"
+        "     - Do NOT truncate sentences. Keep them short but complete.\n"
+        "4. RETURNING USER / PLAN SWITCH PROTOCOL:\n"
+        "   - If the user is returning after a break or has just switched to this plan:\n"
+        "     - **Step 1 (Brief Check-in Check)**: Briefly acknowledge the previous topic/plan if one existed (e.g., 'Moving from work to social...').\n"
+        "     - **Step 2 (Pivot to New)**:  Immediately shift focus to the NEW topic. Ask: 'What's on your mind regarding [New Focus] today?' or 'How are you feeling about [New Focus]?'\n"
+        "     - Do NOT linger on the old plan. The user changed topics for a reason. Prioritize the new path.\n"
+        "5. TONE & EMPATHY:\n"
+        "   - Use 'empathy statements' to validate feelings (e.g., 'It's completely normal to feel that way').\n"
+        "   - Focus on 'Process over Outcome' - celebrate the courage to try.\n"
+        "6. RULES & OUTPUT:\n"
+        "   - Return ONLY raw JSON (no markdown, no backticks).\n"
+        "   - JSON keys: mode ('chat'/'coach'), message (empathetic reply), tips (0-3 strings), plan (0-5 steps), question (guiding next step), options (2-3 clickable path strings).\n"
+        "   - **NO CLOSED STATEMENTS**: Every message must lead to the next step or a reflective question.\n"
+        "   - **OPTIONS**: Always provide 2-3 short clickable paths. Always include one path like 'Something else...' or 'Tell me more'.\n"
+        "\n"
+        "Context for this turn:\n"
+        f"- User focus: {focus}\n"
+        f"- Current plan: {current_plan_summary}\n"
+        f"- Returning moment? {'YES' if is_returning_moment else 'NO'}\n"
+        f"- Just switched to this plan? {'YES' if plan_switched else 'NO'}\n"
+        f"{transition_context}\n"
+        "\n"
+        "FINAL REMINDER: Confidence is the metric. Adjust the pace to fit the user. End with a question or option."
     )
+    return prompt
 
-    if has_plan:
-        plan = state["plans"][plan_id]
-        top_tasks = "\n".join([f"- {t['text']}" for t in (plan.get("tasks") or [])[:8]])
-        user = (
-            f"Topic: {topic_key}\n"
-            f"Existing plan tasks:\n{top_tasks}\n\n"
-            f"User message:\n{user_text}\n\n"
-            "If the user picked a task, give a tiny checklist to start now (no new plan). "
-            "Otherwise reply normally."
-        )
-    else:
-        if saved_conf:
-            user = (
-                f"The user just provided a confidence number for topic '{topic_key}'. "
-                f"User message: {user_text}\n"
-                "Reply briefly. Do not ask more calibration questions."
-            )
-        else:
-            user = user_text
+def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool, coach_id: Optional[str], profile: Optional[Dict[str, Any]] = None) -> ChatResponse:
+    # 1. Determine Coach Name
+    coach_name = "Mira"
+    if (coach_id or "").lower() in ["kai", "male", "coach_kai"]:
+        coach_name = "Kai"
+    
+    # 2. Transition Logic
+    transition_context = _get_coach_transition_context(state, coach_name)
+    
+    # 3. Build System Prompt
+    profile = profile or {}
+    system = _build_system_prompt(state, profile, coach_name, topic_key, transition_context)
 
-    text = gemini_text(system, user)
+    # 4. Construct User Message
+    user_input = user_text
+    if saved_conf:
+        user_input += f"\n(Meta: User just updated confidence score for {topic_key})"
+
+    # 5. Call Gemini
+    raw_response = gemini_text(system, user_input)
+    
+    # 6. Parse JSON Response
+    response_data = {}
+    try:
+        # cleanup if it returns markdown code blocks
+        clean_json = raw_response.replace("```json", "").replace("```", "").strip()
+        response_data = json.loads(clean_json)
+    except Exception:
+        print("❌ Failed to parse JSON from Gemini. Fallback to text.")
+        response_data = {
+            "mode": "chat",
+            "message": raw_response,
+            "options": ["Tell me more", "I'm not sure"]
+        }
+
+    # 7. Extract Fields
+    message_text = response_data.get("message", "")
+    question_text = response_data.get("question", "")
+    full_text = f"{message_text}\n\n{question_text}".strip()
+    
+    # 8. Handle Plan Updates (if any)
+    plan_obj = None
+    plan_steps = response_data.get("plan", [])
+    if isinstance(plan_steps, list) and len(plan_steps) > 0:
+        # Create or update plan
+        plan_id = f"plan_{uuid4().hex[:8]}"
+        plan_obj = {
+            "id": plan_id,
+            "topic": topic_key,
+            "title": f"Plan for {topic_key}",
+            "goal": "Build confidence step by step",
+            "tasks": [{"text": step, "status": "todo"} for step in plan_steps],
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        }
+        state["plans"][plan_id] = plan_obj
+        state["plan_build"]["active_plan_id"] = plan_id
+        state["plan_build"]["topic"] = topic_key
+    
+    # 9. Construct Response
+    # The frontend expects 'messages' list. We merge message + question + options.
+    # Note: The current frontend likely doesn't render 'options' natively from JSON yet, 
+    # so we append them as text or just let them be part of the text. 
+    # For now, we mainly return the text. 
+    
+    # We can append options to text if frontend doesn't support them to ensure they are visible
+    options = response_data.get("options", [])
+    if options:
+       pass # Frontend doesn't explicitly render these from backend yet in ChatResponse, so we rely on text.
 
     return ChatResponse(
-        messages=[CoachMessage(text=text)],
-        ui=UIState(mode="CHAT", show_plan_sidebar=has_plan, plan_link=(f"/plans/{plan_id}" if has_plan else None)),
+        messages=[CoachMessage(text=full_text)],
+        ui=UIState(
+            mode=response_data.get("mode", "CHAT").upper(), 
+            show_plan_sidebar=bool(plan_obj), 
+            plan_link=f"/plans/{plan_obj['id']}" if plan_obj else None,
+            mermaid=plan_to_mermaid(plan_obj) if plan_obj else None
+        ),
         effects=Effects(saved_confidence=saved_conf),
-        plan=None,
+        plan=plan_obj,
     )
 
 def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
@@ -904,96 +1107,147 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
 # ===========================
 # Core processing (shared)
 # ===========================
-def process_chat_message(
-    user_id: str,
-    user_text: str,
-    coach: Optional[str],
-    profile: Optional[Dict[str, Any]],
-    topic: Optional[str],
-) -> ChatResponse:
+@router.post("", response_model=ChatResponse)
+async def chat_endpoint(req: ChatRequest):
+    # Load state
     all_state = _load_all_state()
-    bucket = _get_user_bucket(all_state, user_id)
-    state = _ensure_state_shape(bucket)
+    user_state = _get_user_bucket(all_state, req.user_id)
+    user_state = _ensure_state_shape(user_state)
 
-    user_text = (user_text or "").strip()
-    if not user_text:
-        raise HTTPException(status_code=400, detail="Empty message")
+    # Detect confidence input
+    saved_conf = False
+    if req.topic:
+        topic_key = normalize_topic_key(req.topic)
+        if topic_key and maybe_capture_confidence(user_state, req.message, topic_key):
+            saved_conf = True
 
-    if user_text.lower() == "ping":
-        return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
+    # Current topic
+    topic_key = normalize_topic_key(req.topic) or user_state["plan_build"].get("topic") or "general"
+    if req.profile:
+        # if user context implies a different topic, maybe switch?
+        # for now rely on req.topic
+        pass
 
-    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
-    state["history"] = state["history"][-80:]
+    # Basic history update
+    user_state["history"].append({"role": "user", "text": req.message, "ts": _now_iso()})
+    
+    # Check follow-up injection (Option B)
+    injected_fu = _inject_due_followup_if_needed(user_state, req.coach, topic_key)
+    if injected_fu:
+        # if we injected a message, the user hasn't seen it yet, 
+        # but technically they just replied. 
+        # This logic is tricky in a single turn. 
+        # If the user is replying to a *previous* session, we just proceed.
+        pass
 
-    saved_conf = maybe_capture_confidence(state, user_text, topic_key)
+    # Route
+    mode, step = decide_mode_and_step(user_state, req.message, topic_key)
+    user_state["mode"] = mode
+    if step:
+        user_state["plan_build"]["step"] = step
 
-    mode, step = decide_mode_and_step(state, user_text, topic_key)
-    state["mode"] = mode
-
-    if mode == "CHAT":
-        resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
-    elif mode == "PLAN_BUILD":
+    # Execute
+    if mode == "PLAN_BUILD":
         if step == "DISCOVERY":
-            resp = handle_plan_discovery(state, user_text, topic_key)
+            resp = handle_plan_discovery(user_state, req.message, topic_key)
         elif step == "DRAFT":
-            resp = handle_plan_draft(state, user_text, topic_key)
-        else:
-            resp = handle_plan_refine(state, user_text, topic_key)
+            resp = handle_plan_draft(user_state, req.message, topic_key)
+        else: # REFINE
+            resp = handle_plan_refine(user_state, req.message, topic_key)
     else:
-        state["mode"] = "CHAT"
-        resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
+        resp = handle_chat(user_state, req.message, topic_key, saved_conf, req.coach, req.profile)
 
-    if resp.messages:
-        state["history"].append({"role": "coach", "text": resp.messages[0].text, "ts": _now_iso(), "kind": "coach"})
-        state["history"] = state["history"][-120:]
+    # Save coach msg to history
+    for m in resp.messages:
+        user_state["history"].append({"role": "assistant", "text": m.text, "ts": _now_iso()})
 
-    bucket.clear()
-    bucket.update(state)
+    # Keep history bounded
+    user_state["history"] = user_state["history"][-60:]
+
+    # Schedule next follow-up
+    _schedule_followup(user_state)
+
+    # Save
     _save_all_state(all_state)
 
     return resp
 
 # ===========================
-# Main endpoint (text)
-# ===========================
-@router.post("", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
-    return process_chat_message(
-        user_id=req.user_id,
-        user_text=req.message,
-        coach=req.coach,
-        profile=req.profile,
-        topic=req.topic,
-    )
-
-# ===========================
 # History endpoint (Option B)
 # ===========================
 @router.get("/history", response_model=HistoryResponse)
-def chat_history(
-    user_id: str,
-    topic: Optional[str] = None,
-    coach: Optional[str] = None,
-) -> HistoryResponse:
+def get_history(user_id: str, topic: Optional[str] = None, coach: Optional[str] = None):
     all_state = _load_all_state()
-    bucket = _get_user_bucket(all_state, user_id)
-    state = _ensure_state_shape(bucket)
+    user_state = _get_user_bucket(all_state, user_id)
+    user_state = _ensure_state_shape(user_state)
 
-    topic_key = normalize_topic_key(topic) or "general"
+    # We could filter by topic if we stored topic per message, 
+    # but for now we return the global conversation or just last N.
+    # To support context handover, we might verify if last message was from a different coach.
+    
+    # Check handover
+    current_coach = (coach or "").strip()
+    if current_coach:
+        _get_coach_transition_context(user_state, current_coach) # updates metadata
+        _save_all_state(all_state)
 
-    # ✅ inject due follow-up when user opens the app
-    _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
-
-    bucket.clear()
-    bucket.update(state)
-    _save_all_state(all_state)
-
-    msgs = [HistoryMessage(**m) for m in state.get("history", [])]
-    return HistoryResponse(topic=topic_key, messages=msgs)
+    hist = [
+        HistoryMessage(
+            role=m["role"],
+            text=m["text"],
+            ts=m.get("ts") or _now_iso(),
+            kind=m.get("kind")
+        )
+        for m in user_state["history"]
+    ]
+    
+    return HistoryResponse(
+        topic=topic or "general",
+        messages=hist
+    )
 
 # ===========================
 # Voice endpoint (audio -> whisper -> chat)
 # ===========================
+
+def transcribe_with_gemini(path: str, mime_type: str = "audio/webm") -> str:
+    """Fallback STT using Gemini 1.5 Flash (stable) or 2.0 Flash"""
+    # 1.5 Flash is often more stable for general audio API usage than exp
+    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash-exp"]
+    
+    with open(path, "rb") as f:
+        audio_data = f.read()
+    
+    # Ensure mime_type is valid for Gemini. 
+    # Valid: audio/wav, audio/mp3, audio/aiff, audio/aac, audio/ogg, audio/flac, audio/webm, audio/mpeg
+    print(f"🎤 Transcribing {len(audio_data)} bytes type={mime_type}...")
+
+    last_err = None
+    for m in models_to_try:
+        try:
+            print(f"   Attempts using model={m}...")
+            resp = client.models.generate_content(
+                model=m,
+                contents=[
+                    types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_bytes(data=audio_data, mime_type=mime_type),
+                        types.Part(text="Transcribe this audio verbatim. Output ONLY the transcription text. If no speech, output nothing.")
+                    ]
+                )],
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
+            text = (resp.text or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            print(f"   ❌ Failed with {m}: {e}")
+            last_err = e
+            
+    print(f"❌ All Gemini STT models failed. Last error: {last_err}")
+    return ""
+
 @router.post("/voice", response_model=VoiceChatResponse)
 async def chat_voice(
     user_id: str = Form(...),
@@ -1002,11 +1256,19 @@ async def chat_voice(
     topic: Optional[str] = Form(None),
     profile_json: Optional[str] = Form(None),
 ) -> VoiceChatResponse:
+    log_debug(f"🎤 ENTRY chat_voice: user_id={user_id} file={audio.filename} type={audio.content_type} size={audio.size}")
+    
+    # default to uploaded content type, or fallback to webm
+    mime = audio.content_type or "audio/webm"
+    if "octet-stream" in mime: 
+        mime = "audio/webm" # browsers sometimes send octet-stream for blobs
+
     profile: Optional[Dict[str, Any]] = None
     if profile_json:
         try:
             profile = json.loads(profile_json)
-        except Exception:
+        except Exception as e:
+            log_debug(f"⚠️ profile_json parse failed: {e}")
             profile = None
 
     suffix = ""
@@ -1016,30 +1278,75 @@ async def chat_voice(
             suffix = "." + name.split(".")[-1]
     except Exception:
         suffix = ""
+        
+    # Map common suffix to mime if mime is generic
+    if suffix == ".mp3": mime = "audio/mp3"
+    if suffix == ".wav": mime = "audio/wav"
 
+    tmp_path = None
     try:
+        # Save to temp
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".webm") as tmp:
             tmp_path = tmp.name
             content = await audio.read()
             tmp.write(content)
+            log_debug(f"🎤 Saved temp audio to: {tmp_path} ({len(content)} bytes)")
 
-        transcript = transcribe_audio_file(tmp_path)
-        transcript = (transcript or "").strip()
+        transcript = ""
+        
+        # 1. Gemini STT (Multimodal)
+        transcript = transcribe_with_gemini(tmp_path, mime_type=mime)
+        
+        # 2. Local Whisper Fallback
         if not transcript:
-            transcript = "(Couldn’t detect speech)"
+             try:
+                log_debug("🎤 Gemini returned empty/fail, trying local Whisper fallback...")
+                transcript = transcribe_audio_file(tmp_path)
+             except Exception as e:
+                log_debug(f"❌ Local Whisper failed: {e}")
 
-        chat_resp = process_chat_message(
+        transcript = (transcript or "").strip()
+        log_debug(f"🎤 Transcript result: '{transcript}'")
+        
+        if not transcript:
+            return VoiceChatResponse(
+                transcript="(Transcription failed)",
+                chat=ChatResponse(
+                    messages=[CoachMessage(text="I couldn't detect any speech in that audio. Please try again.")],
+                    ui=UIState(mode="CHAT"),
+                    effects=Effects()
+                )
+            )
+
+        req = ChatRequest(
             user_id=user_id,
-            user_text=transcript,
+            message=transcript,
             coach=coach,
-            profile=profile,
             topic=topic,
+            profile=profile
         )
+        
+        log_debug("🎤 Calling chat_endpoint...")
+        chat_resp = await chat_endpoint(req)
+        log_debug("🎤 chat_endpoint success")
+        
         return VoiceChatResponse(transcript=transcript, chat=chat_resp)
+
+    except Exception as e:
+        log_debug(f"❌ chat_voice CRITICAL ERROR: {e}")
+        traceback.print_exc()
+        return VoiceChatResponse(
+            transcript="(Error)",
+            chat=ChatResponse(
+                messages=[CoachMessage(text=f"Voice processing error: {str(e)}")],
+                ui=UIState(mode="CHAT"),
+                effects=Effects()
+            )
+        )
 
     finally:
         try:
-            if "tmp_path" in locals() and tmp_path and os.path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except Exception:
             pass
