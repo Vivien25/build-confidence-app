@@ -45,6 +45,14 @@ _whisper_impl = None
 _whisper_model = None
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now().isoformat()
+
+
 def _init_whisper_if_needed() -> None:
     global _whisper_ready, _whisper_impl, _whisper_model
     if _whisper_ready:
@@ -98,13 +106,7 @@ def transcribe_audio_file(path: str) -> str:
     except Exception as e:
         print("❌ Whisper transcription failed:", repr(e))
         traceback.print_exc()
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                f"Whisper transcription error: {repr(e)}. "
-                "If this is a decode error, install ffmpeg on the server."
-            ),
-        )
+        raise
 
 
 # ===========================
@@ -113,14 +115,6 @@ def transcribe_audio_file(path: str) -> str:
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _now_iso() -> str:
-    return _now().isoformat()
 
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
@@ -221,7 +215,6 @@ DEFAULT_STATE = {
         "locked": False,
     },
     "plans": {},
-    # ✅ 12-hour follow-up tracking (Option B)
     "followup": {
         "pending_at": None,         # ISO UTC
         "pending_for_ts": None,     # user message ts that scheduled this check-in
@@ -246,7 +239,6 @@ def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in DEFAULT_STATE["followup"].items():
         merged["followup"].setdefault(k, v)
 
-    # normalize older history rows (kind missing)
     for m in merged.get("history", []):
         if isinstance(m, dict):
             m.setdefault("kind", None)
@@ -412,9 +404,6 @@ def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) 
     return "CHAT", None
 
 
-# ===========================
-# Plan lock rule
-# ===========================
 def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
     pb = state["plan_build"]
     active_id = pb.get("active_plan_id")
@@ -499,7 +488,7 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
 
 
 # ===========================
-# Follow-up (Option B): schedule + inject check-in message
+# Follow-up (Option B)
 # ===========================
 def _parse_iso(s: Optional[str]) -> Optional[datetime]:
     if not s:
@@ -512,8 +501,7 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
 
 def _schedule_followup(state: Dict[str, Any]) -> None:
     fu = state.setdefault("followup", {})
-    now = _now()
-    fu["pending_at"] = (now + timedelta(hours=FOLLOWUP_HOURS)).isoformat()
+    fu["pending_at"] = (_now() + timedelta(hours=FOLLOWUP_HOURS)).isoformat()
 
     last_user = next((m for m in reversed(state.get("history", [])) if m.get("role") == "user"), None)
     fu["pending_for_ts"] = last_user.get("ts") if isinstance(last_user, dict) else None
@@ -529,7 +517,6 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
     if _now() < pending_at:
         return False
 
-    # If user sent a new message since scheduling, skip follow-up
     last_user = next((m for m in reversed(state.get("history", [])) if m.get("role") == "user"), None)
     if not last_user or last_user.get("ts") != pending_for_ts:
         fu["pending_at"] = None
@@ -537,7 +524,7 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
         state["followup"] = fu
         return False
 
-    coach_name = "Kai" if (coach_id or "").lower().strip() in ["kai", "male", "coach_kai"] else "Mira"
+    _coach_name = "Kai" if (coach_id or "").lower().strip() in ["kai", "male", "coach_kai"] else "Mira"
     msg = (
         f"Quick check-in 🌱 It’s been about {FOLLOWUP_HOURS} hours.\n"
         f"How did it go on **{topic_key.replace('_', ' ')}**?\n"
@@ -564,10 +551,7 @@ def gemini_text(system: str, user: str) -> str:
         resp = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
-                types.Content(
-                    role="user",
-                    parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]
-                )
+                types.Content(role="user", parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")])
             ],
             config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
         )
@@ -972,25 +956,14 @@ def process_chat_message(
 
     topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
 
-    # ✅ inject due follow-up BEFORE handling the new message
+    # Inject due follow-up before handling new message (optional but helpful)
     _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
 
-    # ✅ Simple dedupe: if same message repeats immediately, avoid double-processing
-    if state.get("history"):
-        last = state["history"][-1]
-        if last.get("role") == "user" and (last.get("text") or "").strip() == user_text:
-            return ChatResponse(
-                messages=[CoachMessage(text="(duplicate received) Got it — can you add one more detail so I can help?")],
-                ui=UIState(mode="CHAT", show_plan_sidebar=False),
-                effects=Effects(),
-                plan=None,
-            )
-
-    # save user message
+    # Save user message
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso(), "kind": "user"})
     state["history"] = state["history"][-120:]
 
-    # ✅ schedule the next follow-up tied to this user message
+    # Schedule next follow-up tied to this user message
     _schedule_followup(state)
 
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
@@ -1051,7 +1024,7 @@ def chat_history(
 
     topic_key = normalize_topic_key(topic) or "general"
 
-    # ✅ inject due follow-up when user opens the app
+    # Inject due follow-up when user opens the app
     _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
 
     bucket.clear()
@@ -1080,21 +1053,45 @@ async def chat_voice(
         except Exception:
             profile = None
 
-    suffix = ""
+    suffix = ".webm"
     try:
-        name = (audio.filename or "").lower()
+        name = (audio.filename or "").lower().strip()
         if "." in name:
-            suffix = "." + name.split(".")[-1]
+            ext = "." + name.split(".")[-1]
+            if ext and len(ext) <= 8:
+                suffix = ext
     except Exception:
-        suffix = ""
+        pass
 
+    tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".webm") as tmp:
-            tmp_path = tmp.name
-            content = await audio.read()
-            tmp.write(content)
+        content = await audio.read()
+        size = len(content or b"")
+        print(f"🎙️ voice upload: filename={audio.filename} content_type={audio.content_type} bytes={size}")
 
-        transcript = transcribe_audio_file(tmp_path)
+        # Prevent EOF decode errors by rejecting tiny/empty uploads
+        if size < 2000:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio upload was empty/too small. Try recording 1–2 seconds, then stop.",
+            )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp_path = tmp.name
+            tmp.write(content)
+            tmp.flush()
+
+        try:
+            transcript = transcribe_audio_file(tmp_path)
+        except Exception as e:
+            msg = repr(e)
+            if "EOFError" in msg or "End of file" in msg or "Invalid data found" in msg:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Couldn’t decode that audio. Try a shorter message, or use Chrome.",
+                )
+            raise HTTPException(status_code=500, detail=f"Whisper transcription error: {repr(e)}")
+
         transcript = (transcript or "").strip()
         if not transcript:
             transcript = "(Couldn’t detect speech)"
@@ -1110,7 +1107,7 @@ async def chat_voice(
 
     finally:
         try:
-            if "tmp_path" in locals() and tmp_path and os.path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
         except Exception:
             pass
