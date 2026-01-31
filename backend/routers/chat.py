@@ -583,12 +583,21 @@ def gemini_text(system: str, user: str) -> str:
 # ===========================
 
 def transcribe_with_gemini(path: str, mime_type: str = "audio/webm") -> str:
-    """Fallback STT using verified available models"""
-    models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash"
-    ]
+    """Fallback STT using Gemini 2.0 Flash (multimodal) or 1.5 family"""
+    # Start with the configured model (e.g. gemini-3-flash-preview)
+    models_to_try = []
+    if GEMINI_MODEL:
+        models_to_try.append(GEMINI_MODEL)
+        
+    # Add robust fallbacks
+    models_to_try.extend([
+        "gemini-2.5-flash", 
+        "gemini-2.0-flash", 
+        "gemini-1.5-flash"
+    ])
+    
+    # Deduplicate in case GEMINI_MODEL is one of the defaults
+    models_to_try = list(dict.fromkeys(models_to_try))
     
     with open(path, "rb") as f:
         audio_data = f.read()
