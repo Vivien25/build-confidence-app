@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 venv/
 .env
+backend/.env
 
 # Local app data (don't deploy/commit)
 backend/app.db
