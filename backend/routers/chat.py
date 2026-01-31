@@ -4,6 +4,7 @@ import json
 import re
 import traceback
 import tempfile
+import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -40,17 +41,12 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")        # tiny/base/small/medi
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")       # cpu | cuda
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
+# Minimum size gate to avoid EOFError from truncated uploads
+VOICE_MIN_BYTES = int(os.getenv("VOICE_MIN_BYTES", "1500"))  # ~1.5KB
+
 _whisper_ready = False
 _whisper_impl = None
 _whisper_model = None
-
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _now_iso() -> str:
-    return _now().isoformat()
 
 
 def _init_whisper_if_needed() -> None:
@@ -82,6 +78,65 @@ def _init_whisper_if_needed() -> None:
         _whisper_model = None
 
 
+def _ffmpeg_exists() -> bool:
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return True
+    except Exception:
+        return False
+
+
+def _transcode_to_wav(in_path: str) -> Optional[str]:
+    """
+    Best-effort conversion to WAV using ffmpeg, to avoid decode issues with WebM/Opus on servers.
+    Returns wav path, or None if ffmpeg not available or conversion fails.
+    """
+    if not _ffmpeg_exists():
+        return None
+
+    out_fd, out_path = tempfile.mkstemp(suffix=".wav")
+    os.close(out_fd)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        in_path,
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-vn",
+        out_path,
+    ]
+
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if proc.returncode != 0:
+            # Conversion failed
+            try:
+                os.remove(out_path)
+            except Exception:
+                pass
+            return None
+
+        # Safety: ensure wav is not empty
+        try:
+            if os.path.getsize(out_path) < 1000:
+                os.remove(out_path)
+                return None
+        except Exception:
+            return None
+
+        return out_path
+    except Exception:
+        try:
+            os.remove(out_path)
+        except Exception:
+            pass
+        return None
+
+
 def transcribe_audio_file(path: str) -> str:
     _init_whisper_if_needed()
     if not _whisper_ready or _whisper_model is None:
@@ -90,12 +145,16 @@ def transcribe_audio_file(path: str) -> str:
             detail="Whisper is not available on the server. Install faster-whisper or openai-whisper (and ffmpeg).",
         )
 
+    # Try to transcode first if possible (more stable than decoding webm directly)
+    wav_path = _transcode_to_wav(path)
+    use_path = wav_path or path
+
     try:
         if _whisper_impl == "openai":
-            result = _whisper_model.transcribe(path)  # type: ignore
+            result = _whisper_model.transcribe(use_path)  # type: ignore
             return (result.get("text") or "").strip()
 
-        segments, _info = _whisper_model.transcribe(path)  # type: ignore
+        segments, _info = _whisper_model.transcribe(use_path)  # type: ignore
         parts: List[str] = []
         for seg in segments:
             t = getattr(seg, "text", "") or ""
@@ -106,7 +165,21 @@ def transcribe_audio_file(path: str) -> str:
     except Exception as e:
         print("❌ Whisper transcription failed:", repr(e))
         traceback.print_exc()
-        raise
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Whisper transcription error: {repr(e)}. "
+                "Audio may be empty, truncated, or an unsupported format. "
+                "If running on Render, installing ffmpeg usually fixes this."
+            ),
+        )
+    finally:
+        # Clean up transcoded file
+        if wav_path:
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
 
 
 # ===========================
@@ -115,6 +188,14 @@ def transcribe_audio_file(path: str) -> str:
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now().isoformat()
 
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
@@ -215,6 +296,7 @@ DEFAULT_STATE = {
         "locked": False,
     },
     "plans": {},
+    # ✅ 12-hour follow-up tracking (Option B)
     "followup": {
         "pending_at": None,         # ISO UTC
         "pending_for_ts": None,     # user message ts that scheduled this check-in
@@ -501,7 +583,8 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
 
 def _schedule_followup(state: Dict[str, Any]) -> None:
     fu = state.setdefault("followup", {})
-    fu["pending_at"] = (_now() + timedelta(hours=FOLLOWUP_HOURS)).isoformat()
+    now = _now()
+    fu["pending_at"] = (now + timedelta(hours=FOLLOWUP_HOURS)).isoformat()
 
     last_user = next((m for m in reversed(state.get("history", [])) if m.get("role") == "user"), None)
     fu["pending_for_ts"] = last_user.get("ts") if isinstance(last_user, dict) else None
@@ -524,7 +607,6 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
         state["followup"] = fu
         return False
 
-    _coach_name = "Kai" if (coach_id or "").lower().strip() in ["kai", "male", "coach_kai"] else "Mira"
     msg = (
         f"Quick check-in 🌱 It’s been about {FOLLOWUP_HOURS} hours.\n"
         f"How did it go on **{topic_key.replace('_', ' ')}**?\n"
@@ -551,7 +633,10 @@ def gemini_text(system: str, user: str) -> str:
         resp = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
-                types.Content(role="user", parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")])
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]
+                )
             ],
             config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
         )
@@ -587,7 +672,7 @@ def extract_bullets(text: str, max_items: int = 10) -> List[str]:
 
 
 # ===========================
-# Confidence: non-blocking metadata
+# Confidence capture
 # ===========================
 def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
     t = (user_text or "").strip().lower()
@@ -607,7 +692,7 @@ def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: s
 
 
 # ===========================
-# Plan building primitives
+# Plan primitives
 # ===========================
 def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_text: str) -> Dict[str, Any]:
     deadline = discovery_answers.get("deadline") or "soon"
@@ -934,7 +1019,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
 
 
 # ===========================
-# Core processing (shared)
+# Core processing
 # ===========================
 def process_chat_message(
     user_id: str,
@@ -956,14 +1041,21 @@ def process_chat_message(
 
     topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
 
-    # Inject due follow-up before handling new message (optional but helpful)
     _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
 
-    # Save user message
+    if state.get("history"):
+        last = state["history"][-1]
+        if last.get("role") == "user" and (last.get("text") or "").strip() == user_text:
+            return ChatResponse(
+                messages=[CoachMessage(text="(duplicate received) Got it — can you add one more detail so I can help?")],
+                ui=UIState(mode="CHAT", show_plan_sidebar=False),
+                effects=Effects(),
+                plan=None,
+            )
+
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso(), "kind": "user"})
     state["history"] = state["history"][-120:]
 
-    # Schedule next follow-up tied to this user message
     _schedule_followup(state)
 
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
@@ -1010,7 +1102,7 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
 # ===========================
-# History endpoint (Option B)
+# History endpoint
 # ===========================
 @router.get("/history", response_model=HistoryResponse)
 def chat_history(
@@ -1024,7 +1116,6 @@ def chat_history(
 
     topic_key = normalize_topic_key(topic) or "general"
 
-    # Inject due follow-up when user opens the app
     _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
 
     bucket.clear()
@@ -1053,45 +1144,53 @@ async def chat_voice(
         except Exception:
             profile = None
 
+    # Determine suffix (best effort)
     suffix = ".webm"
     try:
-        name = (audio.filename or "").lower().strip()
+        name = (audio.filename or "").lower()
         if "." in name:
-            ext = "." + name.split(".")[-1]
-            if ext and len(ext) <= 8:
-                suffix = ext
+            suffix = "." + name.split(".")[-1]
     except Exception:
-        pass
+        suffix = ".webm"
 
     tmp_path = None
     try:
         content = await audio.read()
-        size = len(content or b"")
-        print(f"🎙️ voice upload: filename={audio.filename} content_type={audio.content_type} bytes={size}")
 
-        # Prevent EOF decode errors by rejecting tiny/empty uploads
-        if size < 2000:
+        # ✅ Prevent EOFError: reject empty/truncated uploads
+        if not content or len(content) < VOICE_MIN_BYTES:
             raise HTTPException(
                 status_code=400,
-                detail="Audio upload was empty/too small. Try recording 1–2 seconds, then stop.",
+                detail="Voice message was too short/empty. Hold the mic for 2–3 seconds and try again.",
             )
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             tmp.write(content)
             tmp.flush()
+            try:
+                os.fsync(tmp.fileno())
+            except Exception:
+                pass
 
+        # Extra safety: verify file exists and has size
         try:
-            transcript = transcribe_audio_file(tmp_path)
-        except Exception as e:
-            msg = repr(e)
-            if "EOFError" in msg or "End of file" in msg or "Invalid data found" in msg:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Couldn’t decode that audio. Try a shorter message, or use Chrome.",
-                )
-            raise HTTPException(status_code=500, detail=f"Whisper transcription error: {repr(e)}")
+            sz = os.path.getsize(tmp_path)
+        except Exception:
+            sz = 0
 
+        print(
+            f"🎙️ voice upload: filename={audio.filename} content_type={audio.content_type} "
+            f"bytes={len(content)} file_size={sz} tmp={tmp_path}"
+        )
+
+        if sz < VOICE_MIN_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail="Voice message file was incomplete. Please try again (longer recording).",
+            )
+
+        transcript = transcribe_audio_file(tmp_path)
         transcript = (transcript or "").strip()
         if not transcript:
             transcript = "(Couldn’t detect speech)"
