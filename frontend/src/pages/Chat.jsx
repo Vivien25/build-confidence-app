@@ -141,6 +141,17 @@ function upsertSystemMessage(setMessages, msg) {
   });
 }
 
+function updateMessageById(setMessages, id, patch) {
+  setMessages((prev) => {
+    const arr = Array.isArray(prev) ? prev : [];
+    const idx = arr.findIndex((m) => m.id === id);
+    if (idx < 0) return arr;
+    const next = arr.slice();
+    next[idx] = { ...next[idx], ...patch };
+    return next;
+  });
+}
+
 function getAxiosErrorMessage(err) {
   const detail = err?.response?.data?.detail;
   const message = err?.response?.data?.message;
@@ -327,6 +338,61 @@ function historyRowToUiMessage(h) {
   };
 }
 
+/**
+ * Apply backend chat response into UI (messages + plan + ui state).
+ * Returns lastAssistantText (useful for TTS in voice mode).
+ */
+function applyBackendChatResponse(chat, { setMessages, setBackendUI, focus, needKey, needLabel }) {
+  const ui = chat?.ui || {};
+  const uiState = {
+    mode: ui.mode || "CHAT",
+    show_plan_sidebar: !!ui.show_plan_sidebar,
+    plan_link: ui.plan_link || null,
+    mermaid: ui.mermaid || null,
+  };
+  setBackendUI(uiState);
+
+  const backendMessages = Array.isArray(chat?.messages) ? chat.messages : [];
+  let lastAssistantText = "";
+
+  if (backendMessages.length > 0) {
+    const texts = backendMessages
+      .map((m) => String(m?.text || "").trim())
+      .filter(Boolean);
+
+    if (texts.length) lastAssistantText = texts[texts.length - 1];
+
+    setMessages((prev) => [
+      ...(Array.isArray(prev) ? prev : []),
+      ...texts.map((text) => ({
+        id: uid("msg"),
+        role: "assistant",
+        type: "text",
+        mode: "coach",
+        message: text,
+        ts: new Date().toISOString(),
+      })),
+    ]);
+  }
+
+  if (chat?.plan && typeof chat.plan === "object") {
+    const planObj = adaptBackendPlanToUI(chat.plan, focus, needKey, needLabel);
+
+    const mermaidCode =
+      uiState.mermaid && String(uiState.mermaid).trim()
+        ? String(uiState.mermaid)
+        : `flowchart TD\nA["${String(planObj.title || "Plan").replace(/"/g, '\\"')}"]`;
+
+    setMessages((prev) => [
+      ...(Array.isArray(prev) ? prev : []),
+      { id: uid("msg"), role: "assistant", type: "plan", mode: "coach", plan: planObj, mermaid: mermaidCode, accepted: false },
+      { id: uid("msg"), role: "assistant", type: "plan_accept", mode: "coach", planId: planObj.id, accepted: false },
+    ]);
+  }
+
+  return { lastAssistantText };
+}
+
 export default function Chat() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getProfile() || {});
@@ -433,6 +499,37 @@ export default function Chat() {
   const listRef = useRef(null);
   const reqSeqRef = useRef(0);
 
+  // -----------------------
+  // Voice state + refs
+  // -----------------------
+  const [recording, setRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
+
+  // optional: simple TTS
+  const [voicesReady, setVoicesReady] = useState(false);
+  useEffect(() => {
+    try {
+      const v = window.speechSynthesis?.getVoices?.() || [];
+      if (v.length) setVoicesReady(true);
+      window.speechSynthesis.onvoiceschanged = () => setVoicesReady(true);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  function speakCoach(text) {
+    try {
+      if (!text) return;
+      const u = new SpeechSynthesisUtterance(text);
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    } catch {
+      // ignore
+    }
+  }
+
   function anyPromptActive() {
     return awaitingBaseline || awaitingBaselineReason || awaitingDailyProgress || awaitingDailyConfidence;
   }
@@ -454,8 +551,7 @@ export default function Chat() {
           timeout: AXIOS_TIMEOUT_MS,
         });
 
-      const byHint = (hints) =>
-        pool.find((v) => hints.some((h) => String(v.name || "").toLowerCase().includes(h)));
+        const hist = Array.isArray(res?.data?.messages) ? res.data.messages : [];
 
         const incoming = hist
           .map(historyRowToUiMessage)
@@ -567,7 +663,6 @@ export default function Chat() {
   useEffect(() => {
     if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
-
     if (anyPromptActive()) return;
 
     const conf = loadSaved(confidenceKey, null);
@@ -660,7 +755,6 @@ export default function Chat() {
       if (mySeq !== reqSeqRef.current) return;
 
       const data = res.data || {};
-
       const ui = data.ui || {};
       const uiState = {
         mode: ui.mode || "CHAT",
@@ -776,12 +870,12 @@ ${edges}
 
   const handleDailyProgress = async (didProgress) => {
     if (loading || sendingRef.current) return;
-  
+
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
-  
+
     setAwaitingDailyProgress(false);
-  
+
     // Show user's click in UI
     setMessages((prev) => [
       ...prev,
@@ -793,19 +887,16 @@ ${edges}
         ts: new Date().toISOString(),
       },
     ]);
-  
-    // ✅ IMPORTANT: Tell backend right away, so follow-up logic knows user responded
+
+    // ✅ Tell backend right away (so follow-up logic knows user responded)
     setLoading(true);
     sendingRef.current = true;
-  
+
     try {
       if (didProgress) {
-        // This is intentionally short — it just updates backend history / follow-up state.
-        await callCoachBackend(
-          `Check-in update: I made progress on my "${nLabel}" (${fLabel}) plan since the last check-in.`
-        );
-  
-        // Continue your local UX: ask for confidence number
+        await callCoachBackend(`Check-in update: I made progress on my "${nLabel}" (${fLabel}) plan since the last check-in.`);
+
+        // Continue local UX: ask for confidence number
         setAwaitingDailyConfidence(true);
         upsertSystemMessage(setMessages, {
           id: `system_daily_conf_${focus}_${needSlug}`,
@@ -817,7 +908,7 @@ ${edges}
         });
         return;
       }
-  
+
       // didProgress === false -> backend coaching + tiny next step
       await callCoachBackend(
         `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`
@@ -827,7 +918,7 @@ ${edges}
       sendingRef.current = false;
     }
   };
-  
+
   const sendMessage = async () => {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
@@ -926,9 +1017,7 @@ ${edges}
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
 
-        await callCoachBackend(
-          `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`
-        );
+        await callCoachBackend(`My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`);
         return;
       }
 
@@ -1031,7 +1120,7 @@ ${edges}
     try {
       const form = new FormData();
       form.append("user_id", userId);
-      form.append("coach", coachId); // backend accepts mira/kai too
+      form.append("coach", coachId);
       form.append("topic", topic);
       form.append("profile_json", JSON.stringify(profile || {}));
       form.append("audio", blob, "voice.webm");
@@ -1047,11 +1136,16 @@ ${edges}
       updateMessageById(setMessages, tempUserMsgId, { text: transcript });
 
       const chat = res.data?.chat || {};
-      const { lastAssistantText } = applyBackendChatResponse(chat);
+      const { lastAssistantText } = applyBackendChatResponse(chat, {
+        setMessages,
+        setBackendUI,
+        focus,
+        needKey,
+        needLabel: currentNeedLabel(),
+      });
 
-      // Speak only for voice flows
+      // Speak only for voice flows (optional)
       if (lastAssistantText) {
-        // Ensure some browsers have voices loaded (best effort)
         if (!voicesReady) {
           try {
             window.speechSynthesis.getVoices?.();
@@ -1084,6 +1178,7 @@ ${edges}
     }
   }
 
+  // Clear chat + conversation plans
   const clearChat = () => {
     localStorage.removeItem(chatKey);
     sessionStorage.removeItem(convPlansKey);
@@ -1398,6 +1493,20 @@ ${edges}
           <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
             {loading ? "Sending…" : "Send"}
           </button>
+
+          {/* ✅ Voice controls */}
+          <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {!recording ? (
+              <button onClick={startVoice} disabled={loading || awaitingDailyProgress} style={styles.btn}>
+                🎙️ Record
+              </button>
+            ) : (
+              <button onClick={stopVoice} style={styles.primaryBtn}>
+                ⏹ Stop
+              </button>
+            )}
+            <span style={styles.muted}>{recording ? "Recording…" : "You can also talk instead of typing."}</span>
+          </div>
 
           <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
             In-app check-ins: if you’re away for ~12 hours, the coach will drop a quick progress check here when you come back.

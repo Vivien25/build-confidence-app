@@ -1,4 +1,4 @@
-# backend/chat.py
+# backend/routers/chat.py
 import os
 import json
 import re
@@ -44,6 +44,7 @@ _whisper_ready = False
 _whisper_impl = None
 _whisper_model = None
 
+
 def _init_whisper_if_needed() -> None:
     global _whisper_ready, _whisper_impl, _whisper_model
     if _whisper_ready:
@@ -72,6 +73,7 @@ def _init_whisper_if_needed() -> None:
         _whisper_impl = None
         _whisper_model = None
 
+
 def transcribe_audio_file(path: str) -> str:
     _init_whisper_if_needed()
     if not _whisper_ready or _whisper_model is None:
@@ -82,14 +84,11 @@ def transcribe_audio_file(path: str) -> str:
 
     try:
         if _whisper_impl == "openai":
-            # openai-whisper
-            # result = {"text": "...", ...}
             result = _whisper_model.transcribe(path)  # type: ignore
-            text = (result.get("text") or "").strip()
-            return text
+            return (result.get("text") or "").strip()
 
-        segments, info = _whisper_model.transcribe(path)  # type: ignore
-        parts = []
+        segments, _info = _whisper_model.transcribe(path)  # type: ignore
+        parts: List[str] = []
         for seg in segments:
             t = getattr(seg, "text", "") or ""
             if t.strip():
@@ -99,7 +98,14 @@ def transcribe_audio_file(path: str) -> str:
     except Exception as e:
         print("❌ Whisper transcription failed:", repr(e))
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Whisper transcription error: {repr(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Whisper transcription error: {repr(e)}. "
+                "If this is a decode error, install ffmpeg on the server."
+            ),
+        )
+
 
 # ===========================
 # Tiny JSON-file state store
@@ -108,8 +114,14 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "user_state.json"
 
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now_iso() -> str:
     return _now().isoformat()
+
 
 def _safe_read_json(path: Path, fallback: Any) -> Any:
     try:
@@ -119,21 +131,26 @@ def _safe_read_json(path: Path, fallback: Any) -> Any:
     except Exception:
         return fallback
 
+
 def _safe_write_json(path: Path, data: Any) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
+
 def _load_all_state() -> Dict[str, Any]:
     return _safe_read_json(STATE_FILE, {})
 
+
 def _save_all_state(all_state: Dict[str, Any]) -> None:
     _safe_write_json(STATE_FILE, all_state)
+
 
 def _get_user_bucket(all_state: Dict[str, Any], user_id: str) -> Dict[str, Any]:
     if user_id not in all_state:
         all_state[user_id] = {}
     return all_state[user_id]
+
 
 # ===========================
 # Request / Response models
@@ -145,9 +162,11 @@ class ChatRequest(BaseModel):
     profile: Optional[Dict[str, Any]] = None
     topic: Optional[str] = None
 
+
 class CoachMessage(BaseModel):
     role: str = "coach"
     text: str
+
 
 class UIState(BaseModel):
     mode: str
@@ -155,16 +174,19 @@ class UIState(BaseModel):
     plan_link: Optional[str] = None
     mermaid: Optional[str] = None
 
+
 class Effects(BaseModel):
     saved_confidence: bool = False
     created_plan_id: Optional[str] = None
     updated_plan_id: Optional[str] = None
+
 
 class ChatResponse(BaseModel):
     messages: List[CoachMessage]
     ui: UIState
     effects: Effects
     plan: Optional[Dict[str, Any]] = None
+
 
 class VoiceChatResponse(BaseModel):
     transcript: str
@@ -182,6 +204,7 @@ class HistoryResponse(BaseModel):
     topic: str
     messages: List[HistoryMessage]
 
+
 # ===========================
 # State schema
 # ===========================
@@ -198,14 +221,14 @@ DEFAULT_STATE = {
         "locked": False,
     },
     "plans": {},
-
-    # ✅ NEW: follow-up tracking (Option B: in-app check-in)
+    # ✅ 12-hour follow-up tracking (Option B)
     "followup": {
         "pending_at": None,         # ISO UTC
         "pending_for_ts": None,     # user message ts that scheduled this check-in
         "last_sent_at": None,       # ISO UTC
     },
 }
+
 
 def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     merged = json.loads(json.dumps(DEFAULT_STATE))
@@ -230,9 +253,15 @@ def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
 
     return merged
 
+
 # ===========================
 # Intent / Topic router
 # ===========================
+_GREET_PATTERNS = [
+    r"^(hi|hello|hey|hiya|yo)\b[!.\s]*$",
+    r"^(good\s*(morning|afternoon|evening))\b[!.\s]*$",
+]
+
 _NEW_PLAN_PATTERNS = [
     r"\bnew plan\b",
     r"\bcreate a new plan\b",
@@ -281,24 +310,38 @@ _SHOW_PLAN_PATTERNS = [
     r"\bopen the plan\b",
 ]
 
+
 def _matches_any(text: str, patterns: List[str]) -> bool:
     t = (text or "").lower()
     return any(re.search(p, t) for p in patterns)
 
+
+def is_greeting(user_text: str) -> bool:
+    t = (user_text or "").strip().lower()
+    return any(re.search(p, t) for p in _GREET_PATTERNS)
+
+
 def explicit_new_plan_request(user_text: str) -> bool:
     return _matches_any(user_text, _NEW_PLAN_PATTERNS)
 
+
 def plan_requested(user_text: str) -> bool:
+    if is_greeting(user_text):
+        return False
     return _matches_any(user_text, _PLAN_REQUEST_PATTERNS)
+
 
 def refine_requested(user_text: str) -> bool:
     return _matches_any(user_text, _REFINE_PATTERNS)
 
+
 def skip_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SKIP_PATTERNS)
 
+
 def show_plan_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SHOW_PLAN_PATTERNS)
+
 
 def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     if not topic:
@@ -308,8 +351,12 @@ def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
     t = re.sub(r"_+", "_", t).strip("_")
     return t or None
 
+
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
     t = (user_text or "").lower()
+
+    if is_greeting(user_text):
+        return "general"
 
     if any(k in t for k in ["interview", "behavioral", "system design", "leetcode", "ml ops", "mle", "data engineer"]):
         return "interview_confidence"
@@ -327,6 +374,7 @@ def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) ->
 
     return "general"
 
+
 # ===========================
 # Deterministic mode router
 # ===========================
@@ -335,7 +383,11 @@ DISCOVERY_QUESTIONS = [
     "What’s the main target: ML Ops / Data Engineering / both? (One word is fine.)",
 ]
 
+
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
+    if is_greeting(user_text):
+        return "CHAT", None
+
     if skip_requested(user_text):
         return "CHAT", None
 
@@ -359,6 +411,7 @@ def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) 
 
     return "CHAT", None
 
+
 # ===========================
 # Plan lock rule
 # ===========================
@@ -374,6 +427,7 @@ def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str
     if explicit_new_plan_request(user_text):
         return True
     return False
+
 
 # ===========================
 # Learning resources
@@ -412,6 +466,7 @@ RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
     ],
 }
 
+
 def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
     t = (task_text or "").lower()
     picks: List[Dict[str, str]] = []
@@ -442,6 +497,7 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
             break
     return out
 
+
 # ===========================
 # Follow-up (Option B): schedule + inject check-in message
 # ===========================
@@ -455,9 +511,6 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
 
 
 def _schedule_followup(state: Dict[str, Any]) -> None:
-    """
-    Schedule a check-in FOLLOWUP_HOURS from now, tied to the last user message ts.
-    """
     fu = state.setdefault("followup", {})
     now = _now()
     fu["pending_at"] = (now + timedelta(hours=FOLLOWUP_HOURS)).isoformat()
@@ -467,21 +520,16 @@ def _schedule_followup(state: Dict[str, Any]) -> None:
 
 
 def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str], topic_key: str) -> bool:
-    """
-    If pending follow-up time is due AND user hasn't sent a new message since it was scheduled,
-    inject a coach message into history. Returns True if injected.
-    """
     fu = state.get("followup") or {}
     pending_at = _parse_iso(fu.get("pending_at"))
     pending_for_ts = fu.get("pending_for_ts")
 
     if not pending_at or not pending_for_ts:
         return False
-
     if _now() < pending_at:
         return False
 
-    # If user sent a new message since scheduling, skip this follow-up
+    # If user sent a new message since scheduling, skip follow-up
     last_user = next((m for m in reversed(state.get("history", [])) if m.get("role") == "user"), None)
     if not last_user or last_user.get("ts") != pending_for_ts:
         fu["pending_at"] = None
@@ -506,6 +554,7 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
     fu["pending_for_ts"] = None
     state["followup"] = fu
     return True
+
 
 # ===========================
 # Gemini helpers
@@ -536,10 +585,6 @@ def gemini_text(system: str, user: str) -> str:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Gemini error: {repr(e)}")
 
-@router.get("/debug/ping-gemini")
-def ping_gemini():
-    txt = gemini_text("Reply with exactly the word OK.", "ping")
-    return {"ok": True, "model": GEMINI_MODEL, "reply": txt}
 
 def extract_bullets(text: str, max_items: int = 10) -> List[str]:
     lines = [ln.strip() for ln in (text or "").splitlines()]
@@ -555,6 +600,7 @@ def extract_bullets(text: str, max_items: int = 10) -> List[str]:
         if len(bullets) >= max_items:
             break
     return bullets
+
 
 # ===========================
 # Confidence: non-blocking metadata
@@ -574,6 +620,7 @@ def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: s
     conf["last"] = val
     conf["updated_at"] = _now_iso()
     return True
+
 
 # ===========================
 # Plan building primitives
@@ -619,11 +666,9 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
     }
     title = title_map.get(topic_key, "Personal Plan")
 
-    tasks = []
-    for t in task_texts:
-        tasks.append({"text": t, "status": "todo", "resources": pick_resources(topic_key, t, max_items=3)})
+    tasks = [{"text": t, "status": "todo", "resources": pick_resources(topic_key, t, max_items=3)} for t in task_texts]
 
-    plan = {
+    return {
         "id": plan_id,
         "topic": topic_key,
         "title": title,
@@ -637,7 +682,7 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
         "created_at": _now_iso(),
         "updated_at": _now_iso(),
     }
-    return plan
+
 
 def plan_to_mermaid(plan: Dict[str, Any]) -> str:
     title = (plan.get("title") or "Plan").replace('"', "'")
@@ -650,6 +695,7 @@ def plan_to_mermaid(plan: Dict[str, Any]) -> str:
         lines.append(f'{node_id}["{txt}"]')
         lines.append(f"A --> {node_id}")
     return "\n".join(lines)
+
 
 # ===========================
 # Mode handlers
@@ -665,6 +711,7 @@ def _coach_style(coach_id: Optional[str]) -> str:
         "You are Coach Mira (female). Warm, encouraging, conversational. "
         "Short and natural. Practical steps. Gentle confidence-building tone."
     )
+
 
 def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool, coach_id: Optional[str]) -> ChatResponse:
     pb = state["plan_build"]
@@ -718,6 +765,7 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
         plan=None,
     )
 
+
 def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
     pb["topic"] = topic_key
@@ -746,6 +794,7 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
         plan=None,
     )
 
+
 def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
     pb["topic"] = topic_key
@@ -769,13 +818,12 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
         )
 
     plan = build_plan_object(topic_key, pb.get("discovery_answers") or {}, user_text)
-
     state["plans"][plan["id"]] = plan
     pb["active_plan_id"] = plan["id"]
     pb["locked"] = True
     pb["step"] = "REFINE"
 
-    mermaid = plan_to_mermaid(plan)
+    mermaid_code = plan_to_mermaid(plan)
     plan_link = f"/plans/{plan['id']}"
 
     coach_text = (
@@ -785,13 +833,13 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
     )
 
     state["mode"] = "CHAT"
-
     return ChatResponse(
         messages=[CoachMessage(text=coach_text)],
-        ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid),
+        ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid_code),
         effects=Effects(created_plan_id=plan["id"]),
         plan=plan,
     )
+
 
 def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
     pb = state["plan_build"]
@@ -893,13 +941,13 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
     )
 
     state["mode"] = "CHAT"
-
     return ChatResponse(
         messages=[CoachMessage(text=coach_text)],
         ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
         effects=Effects(updated_plan_id=plan_id),
         plan=plan,
     )
+
 
 # ===========================
 # Core processing (shared)
@@ -922,8 +970,28 @@ def process_chat_message(
     if user_text.lower() == "ping":
         return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
 
-    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso()})
-    state["history"] = state["history"][-80:]
+    topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
+
+    # ✅ inject due follow-up BEFORE handling the new message
+    _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
+
+    # ✅ Simple dedupe: if same message repeats immediately, avoid double-processing
+    if state.get("history"):
+        last = state["history"][-1]
+        if last.get("role") == "user" and (last.get("text") or "").strip() == user_text:
+            return ChatResponse(
+                messages=[CoachMessage(text="(duplicate received) Got it — can you add one more detail so I can help?")],
+                ui=UIState(mode="CHAT", show_plan_sidebar=False),
+                effects=Effects(),
+                plan=None,
+            )
+
+    # save user message
+    state["history"].append({"role": "user", "text": user_text, "ts": _now_iso(), "kind": "user"})
+    state["history"] = state["history"][-120:]
+
+    # ✅ schedule the next follow-up tied to this user message
+    _schedule_followup(state)
 
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
@@ -953,6 +1021,7 @@ def process_chat_message(
 
     return resp
 
+
 # ===========================
 # Main endpoint (text)
 # ===========================
@@ -965,6 +1034,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         profile=req.profile,
         topic=req.topic,
     )
+
 
 # ===========================
 # History endpoint (Option B)
@@ -990,6 +1060,7 @@ def chat_history(
 
     msgs = [HistoryMessage(**m) for m in state.get("history", [])]
     return HistoryResponse(topic=topic_key, messages=msgs)
+
 
 # ===========================
 # Voice endpoint (audio -> whisper -> chat)
