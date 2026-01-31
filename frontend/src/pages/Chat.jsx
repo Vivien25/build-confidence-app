@@ -1182,16 +1182,18 @@ export default function Chat() {
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => navigate("/plans")} style={styles.btn}>Your All Plans</button>
-          <button onClick={() => navigate("/focus")} style={styles.btn}>Change focus</button>
-          <button onClick={clearChat} style={styles.btn}>Clear chat (and conversation plans)</button>
-
-          {/* ✅ Voice controls */}
-          <button onClick={recording ? stopVoice : startVoice} style={recording ? styles.primaryBtn : styles.btn} disabled={loading || awaitingDailyProgress}>
-            {recording ? "Stop 🎙️" : "Voice 🎙️"}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+           <button onClick={() => navigate("/plans")} style={styles.btn}>
+           Your All Plans
           </button>
-        </div>
+          <button onClick={() => navigate("/focus")} style={styles.btn}>
+           Change focus
+           </button>
+           <button onClick={clearChat} style={styles.btn}>
+            Clear chat (and conversation plans)
+           </button>
+         </div>
+
       </div>
 
       {/* Need selector */}
@@ -1372,9 +1374,24 @@ export default function Chat() {
             </div>
           )}
 
-          <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
-            {loading ? "Sending…" : "Send"}
-          </button>
+    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <button
+       onClick={sendMessage}
+        disabled={loading || awaitingDailyProgress}
+        style={styles.sendBtn}
+       >
+        {loading ? "Sending…" : "Send"}
+      </button>
+
+      <button
+      onClick={recording ? stopVoice : startVoice}
+      disabled={loading || awaitingDailyProgress}
+      style={recording ? styles.sendBtn : styles.btn}
+      >
+       {recording ? "Stop 🎙️" : "Voice 🎙️"}
+      </button>
+  </div>
+
 
           <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
             In-app check-ins: if you’re away for ~12 hours, the coach will drop a quick progress check here when you come back.
