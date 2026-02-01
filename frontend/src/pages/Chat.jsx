@@ -344,7 +344,8 @@ function speakCoach(text) {
   } catch {}
 }
 
-// Apply backend /chat response into UI messages + plans
+// ✅ Apply backend /chat response into UI messages + plans
+// Fix A: attach backend_key so /history merge won't duplicate assistant messages
 function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, needLabel, messagesSnapshot) {
   const ui = data.ui || {};
   const uiState = {
@@ -360,21 +361,72 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
 
   if (backendMessages.length > 0) {
     const toAdd = backendMessages
-      .map((m) => String(m?.text || "").trim())
-      .filter(Boolean)
-      .map((text) => {
-        lastAssistantText = text;
+      .map((m) => {
+        // Support both object rows and legacy string messages
+        if (typeof m === "string") {
+          const text = String(m || "").trim();
+          if (!text) return null;
+          const ts = new Date().toISOString();
+          const role = "assistant";
+          const kind = "";
+          const backend_key = `${ts}|${role}|${kind}|${text}`;
+          lastAssistantText = text;
+          return {
+            id: uid("msg"),
+            backend_key,
+            role: "assistant",
+            type: "text",
+            mode: "coach",
+            message: text,
+            ts,
+            fromBackend: true,
+          };
+        }
+
+        const role = String(m?.role || "assistant");
+        const text = String(m?.text || "").trim();
+        const kind = String(m?.kind || "");
+        // Backend should provide stable ts for Fix A
+        const ts = String(m?.ts || m?.timestamp || m?.created_at || new Date().toISOString());
+        if (!text) return null;
+
+        const backend_key = `${ts}|${role}|${kind}|${text}`;
+        if (role === "assistant") lastAssistantText = text;
+
+        if (role === "user") {
+          return {
+            id: uid("msg"),
+            backend_key,
+            role: "user",
+            type: "text",
+            text,
+            ts,
+            fromBackend: true,
+          };
+        }
+
+        // assistant
         return {
           id: uid("msg"),
+          backend_key,
           role: "assistant",
           type: "text",
           mode: "coach",
           message: text,
-          ts: new Date().toISOString(),
+          ts,
+          fromBackend: true,
         };
-      });
+      })
+      .filter(Boolean);
 
-    if (toAdd.length) setMessages((prev) => [...prev, ...toAdd]);
+    if (toAdd.length) {
+      setMessages((prev) => {
+        const prevArr = Array.isArray(prev) ? prev : [];
+        const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
+        const filtered = toAdd.filter((x) => !x.backend_key || !existingKeys.has(x.backend_key));
+        return filtered.length ? [...prevArr, ...filtered] : prevArr;
+      });
+    }
   }
 
   if (data.plan && typeof data.plan === "object") {
@@ -539,10 +591,10 @@ export default function Chat() {
   function promptBaselineNow() {
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
-  
+
     setAwaitingBaseline(true);
     saveSession(`${uiKey}_awaitBaseline`, true); // ✅ ensure persistence immediately
-  
+
     upsertSystemMessage(setMessages, {
       id: `system_baseline_${focus}_${needSlug}`,
       role: "assistant",
@@ -552,12 +604,11 @@ export default function Chat() {
       message: `Before I build a plan for **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
     });
   }
-  
 
-  // ✅ helper: same regex/logic you already use
+  // ✅ FIX #3: boolean return
   function userAskedForPlan(text) {
     const t = String(text || "").toLowerCase();
-    return /\b(plan|steps|roadmap|action items|what should i do|next steps|schedule)\b/;
+    return /\b(plan|steps|roadmap|action items|what should i do|next steps|schedule)\b/.test(t);
   }
 
   // ✅ Load local cached chat immediately, then sync backend history (Option B)
@@ -586,11 +637,10 @@ export default function Chat() {
           const prevArr = Array.isArray(prev) ? prev : [];
           const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
           // ✅ if we're waiting for baseline input, don't inject backend messages on top
-         if (awaitingBaseline || awaitingBaselineReason) return prevArr;
-         const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
-         if (toAdd.length === 0) return prevArr;
-         return [...prevArr, ...toAdd];
-
+          if (awaitingBaseline || awaitingBaselineReason) return prevArr;
+          const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
+          if (toAdd.length === 0) return prevArr;
+          return [...prevArr, ...toAdd];
         });
       } catch {
         // ignore
@@ -598,7 +648,6 @@ export default function Chat() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatKey, userId, focus, needKey, customNeedLabel, coachId, awaitingBaseline, awaitingBaselineReason]);
-
 
   // Persist chat
   useEffect(() => {
@@ -859,7 +908,7 @@ export default function Chat() {
   const sendMessage = async () => {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
-  
+
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
@@ -874,41 +923,38 @@ export default function Chat() {
       ]);
       return;
     }
-  
+
     sendingRef.current = true;
-  
+
     const userText = input.trim();
     setInput("");
-  
+
     // ✅ mark the user as active (same as before)
     if (!isGreeting(userText)) setHasUserSpoken(true);
-  
+
     // ✅ if they asked for a plan, we want baseline
     const askedForPlan = userAskedForPlan(userText);
     const isJustConfidenceNumber = parseConfidence(userText) != null;
 
     if (!readyForBaseline && askedForPlan && !isJustConfidenceNumber) setReadyForBaseline(true);
-  
+
     // ✅ show the user's message immediately (same as before)
     setMessages((prev) => [
       ...prev,
       { id: uid("msg"), role: "user", text: userText, type: "text", ts: new Date().toISOString() },
     ]);
-  
-    // ✅ ENFORCEMENT: if plan requested but no baseline yet, prompt baseline and stop.
-    // (Do this BEFORE setLoading(true) and BEFORE calling backend)
-    const baseline = getLocalBaseline(); // helper you added inside Chat()
-    // Only enforce baseline if we're NOT already in a baseline flow
-    if (askedForPlan && !isJustConfidenceNumber && baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
-   promptBaselineNow();
-   sendingRef.current = false;
-   return;
-   }
 
-  
+    // ✅ ENFORCEMENT: if plan requested but no baseline yet, prompt baseline and stop.
+    const baseline = getLocalBaseline();
+    if (askedForPlan && !isJustConfidenceNumber && baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
+      promptBaselineNow();
+      sendingRef.current = false;
+      return;
+    }
+
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
-  
+
     try {
       if (awaitingBaselineReason) {
         setLoading(true);
@@ -918,7 +964,7 @@ export default function Chat() {
         );
         return;
       }
-  
+
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
@@ -935,15 +981,15 @@ export default function Chat() {
           ]);
           return;
         }
-  
+
         saveConfidence(level);
         await syncBaselineToBackend(level);
-  
+
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(true);
-  
+
         setMessages((prev) => prev.filter((m) => !(m.type === "system" && m.kind === "baseline_prompt")));
-  
+
         upsertSystemMessage(setMessages, {
           id: `system_baseline_reason_${focus}_${needSlug}`,
           role: "assistant",
@@ -954,7 +1000,7 @@ export default function Chat() {
         });
         return;
       }
-  
+
       if (awaitingDailyConfidence) {
         const level = parseConfidence(userText);
         if (level == null) {
@@ -971,22 +1017,22 @@ export default function Chat() {
           ]);
           return;
         }
-  
+
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
-  
+
         await callCoachBackend(
           `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`
         );
         return;
       }
-  
+
       await callCoachBackend(`[Need: ${nLabel}] ${userText}`);
     } finally {
       setLoading(false);
       sendingRef.current = false;
     }
-  };  
+  };
 
   // -----------------------
   // Voice: record + send
@@ -1160,6 +1206,48 @@ export default function Chat() {
     setConvPlans([]);
   };
 
+  // ✅ NEW #1: reset baseline only (current focus + need)
+  const resetBaseline = () => {
+    try {
+      localStorage.removeItem(confidenceKey);
+    } catch {}
+
+    // reset baseline-related UX flags for this need
+    setAwaitingBaseline(false);
+    setAwaitingBaselineReason(false);
+    setAwaitingDailyConfidence(false);
+
+    try {
+      sessionStorage.removeItem(`${uiKey}_awaitBaseline`);
+      sessionStorage.removeItem(`${uiKey}_awaitBaselineReason`);
+      sessionStorage.removeItem(`${uiKey}_awaitDailyConfidence`);
+    } catch {}
+
+    // remove any baseline system prompts currently shown
+    setMessages((prev) =>
+      (prev || []).filter(
+        (m) =>
+          !(
+            m.type === "system" &&
+            (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt")
+          )
+      )
+    );
+
+    // optional: confirm in chat (assistant message)
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: uid("msg"),
+        role: "assistant",
+        type: "text",
+        mode: "coach",
+        message: "Baseline reset ✅ Next time you ask for a plan, I’ll ask your 1–10 confidence first.",
+        ts: new Date().toISOString(),
+      },
+    ]);
+  };
+
   const styles = {
     page: { maxWidth: 1200, margin: "0 auto", padding: 16, color: "var(--text-primary, #111827)" },
     layout: { display: "grid", gridTemplateColumns: "minmax(0, 1fr) 360px", gap: 16, alignItems: "start" },
@@ -1265,18 +1353,23 @@ export default function Chat() {
           </div>
         </div>
 
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-           <button onClick={() => navigate("/plans")} style={styles.btn}>
-           Your All Plans
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => navigate("/plans")} style={styles.btn}>
+            Your All Plans
           </button>
           <button onClick={() => navigate("/focus")} style={styles.btn}>
-           Change focus
-           </button>
-           <button onClick={clearChat} style={styles.btn}>
-            Clear chat (and conversation plans)
-           </button>
-         </div>
+            Change focus
+          </button>
 
+          {/* ✅ NEW button #1 */}
+          <button onClick={resetBaseline} style={styles.btn} disabled={loading}>
+            Reset confidence baseline
+          </button>
+
+          <button onClick={clearChat} style={styles.btn}>
+            Clear chat (and conversation plans)
+          </button>
+        </div>
       </div>
 
       {/* Need selector */}
@@ -1457,24 +1550,23 @@ export default function Chat() {
             </div>
           )}
 
-    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-      <button
-       onClick={sendMessage}
-        disabled={loading || awaitingDailyProgress}
-        style={styles.sendBtn}
-       >
-        {loading ? "Sending…" : "Send"}
-      </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              onClick={sendMessage}
+              disabled={loading || awaitingDailyProgress}
+              style={styles.sendBtn}
+            >
+              {loading ? "Sending…" : "Send"}
+            </button>
 
-      <button
-      onClick={recording ? stopVoice : startVoice}
-      disabled={loading || awaitingDailyProgress}
-      style={recording ? styles.sendBtn : styles.btn}
-      >
-       {recording ? "Stop 🎙️" : "Voice 🎙️"}
-      </button>
-  </div>
-
+            <button
+              onClick={recording ? stopVoice : startVoice}
+              disabled={loading || awaitingDailyProgress}
+              style={recording ? styles.sendBtn : styles.btn}
+            >
+              {recording ? "Stop 🎙️" : "Voice 🎙️"}
+            </button>
+          </div>
 
           <div style={{ ...styles.muted, marginTop: 10, fontSize: 12 }}>
             In-app check-ins: if you’re away for ~12 hours, the coach will drop a quick progress check here when you come back.

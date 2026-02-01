@@ -113,14 +113,12 @@ def _transcode_to_wav(in_path: str) -> Optional[str]:
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if proc.returncode != 0:
-            # Conversion failed
             try:
                 os.remove(out_path)
             except Exception:
                 pass
             return None
 
-        # Safety: ensure wav is not empty
         try:
             if os.path.getsize(out_path) < 1000:
                 os.remove(out_path)
@@ -145,7 +143,6 @@ def transcribe_audio_file(path: str) -> str:
             detail="Whisper is not available on the server. Install faster-whisper or openai-whisper (and ffmpeg).",
         )
 
-    # Try to transcode first if possible (more stable than decoding webm directly)
     wav_path = _transcode_to_wav(path)
     use_path = wav_path or path
 
@@ -174,7 +171,6 @@ def transcribe_audio_file(path: str) -> str:
             ),
         )
     finally:
-        # Clean up transcoded file
         if wav_path:
             try:
                 os.remove(wav_path)
@@ -238,9 +234,12 @@ class ChatRequest(BaseModel):
     topic: Optional[str] = None
 
 
+# ✅ Fix A: add stable ts (and optional kind) to /chat messages
 class CoachMessage(BaseModel):
     role: str = "coach"
     text: str
+    ts: str
+    kind: Optional[str] = None
 
 
 class UIState(BaseModel):
@@ -278,6 +277,11 @@ class HistoryMessage(BaseModel):
 class HistoryResponse(BaseModel):
     topic: str
     messages: List[HistoryMessage]
+
+
+def _coach_msg(text: str, kind: Optional[str] = "coach") -> CoachMessage:
+    # ✅ Create coach message once with stable ts for Fix A
+    return CoachMessage(role="coach", text=text, ts=_now_iso(), kind=kind)
 
 
 # ===========================
@@ -791,7 +795,7 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
         plan = state["plans"][plan_id]
         state["mode"] = "CHAT"
         return ChatResponse(
-            messages=[CoachMessage(text="Here’s your current plan. Want to work on step 1, or revise anything?")],
+            messages=[_coach_msg("Here’s your current plan. Want to work on step 1, or revise anything?")],
             ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
             effects=Effects(saved_confidence=saved_conf),
             plan=plan,
@@ -828,7 +832,7 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
     text = gemini_text(system, user)
 
     return ChatResponse(
-        messages=[CoachMessage(text=text)],
+        messages=[_coach_msg(text)],
         ui=UIState(mode="CHAT", show_plan_sidebar=has_plan, plan_link=(f"/plans/{plan_id}" if has_plan else None)),
         effects=Effects(saved_confidence=saved_conf),
         plan=None,
@@ -857,7 +861,7 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
 
     state["mode"] = "PLAN_BUILD"
     return ChatResponse(
-        messages=[CoachMessage(text=question)],
+        messages=[_coach_msg(question)],
         ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True),
         effects=Effects(),
         plan=None,
@@ -875,7 +879,7 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
         active_id = pb.get("active_plan_id")
         plan = state["plans"].get(active_id) if active_id else None
         return ChatResponse(
-            messages=[CoachMessage(text="You already have a plan for this topic. Want to work on step 1 or revise anything?")],
+            messages=[_coach_msg("You already have a plan for this topic. Want to work on step 1 or revise anything?")],
             ui=UIState(
                 mode="CHAT",
                 show_plan_sidebar=True,
@@ -903,7 +907,7 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
 
     state["mode"] = "CHAT"
     return ChatResponse(
-        messages=[CoachMessage(text=coach_text)],
+        messages=[_coach_msg(coach_text)],
         ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=plan_link, mermaid=mermaid_code),
         effects=Effects(created_plan_id=plan["id"]),
         plan=plan,
@@ -933,7 +937,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
     if not refine_requested(user_text):
         state["mode"] = "CHAT"
         return ChatResponse(
-            messages=[CoachMessage(text="Got it. Which step do you want to tackle today?")],
+            messages=[_coach_msg("Got it. Which step do you want to tackle today?")],
             ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
             effects=Effects(),
             plan=None,
@@ -1011,7 +1015,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
 
     state["mode"] = "CHAT"
     return ChatResponse(
-        messages=[CoachMessage(text=coach_text)],
+        messages=[_coach_msg(coach_text)],
         ui=UIState(mode="CHAT", show_plan_sidebar=True, plan_link=f"/plans/{plan_id}", mermaid=plan_to_mermaid(plan)),
         effects=Effects(updated_plan_id=plan_id),
         plan=plan,
@@ -1037,7 +1041,7 @@ def process_chat_message(
         raise HTTPException(status_code=400, detail="Empty message")
 
     if user_text.lower() == "ping":
-        return ChatResponse(messages=[CoachMessage(text="")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
+        return ChatResponse(messages=[_coach_msg("")], ui=UIState(mode="CHAT"), effects=Effects(), plan=None)
 
     topic_key = normalize_topic_key(topic) or infer_topic_key(user_text, profile)
 
@@ -1047,7 +1051,7 @@ def process_chat_message(
         last = state["history"][-1]
         if last.get("role") == "user" and (last.get("text") or "").strip() == user_text:
             return ChatResponse(
-                messages=[CoachMessage(text="(duplicate received) Got it — can you add one more detail so I can help?")],
+                messages=[_coach_msg("(duplicate received) Got it — can you add one more detail so I can help?")],
                 ui=UIState(mode="CHAT", show_plan_sidebar=False),
                 effects=Effects(),
                 plan=None,
@@ -1076,8 +1080,12 @@ def process_chat_message(
         state["mode"] = "CHAT"
         resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
 
+    # ✅ Fix A: persist coach reply using the SAME ts/kind as returned in /chat
     if resp.messages:
-        state["history"].append({"role": "coach", "text": resp.messages[0].text, "ts": _now_iso(), "kind": "coach"})
+        m0 = resp.messages[0]
+        state["history"].append(
+            {"role": "coach", "text": m0.text, "ts": m0.ts, "kind": (m0.kind or "coach")}
+        )
         state["history"] = state["history"][-120:]
 
     bucket.clear()
@@ -1144,7 +1152,6 @@ async def chat_voice(
         except Exception:
             profile = None
 
-    # Determine suffix (best effort)
     suffix = ".webm"
     try:
         name = (audio.filename or "").lower()
@@ -1157,7 +1164,6 @@ async def chat_voice(
     try:
         content = await audio.read()
 
-        # ✅ Prevent EOFError: reject empty/truncated uploads
         if not content or len(content) < VOICE_MIN_BYTES:
             raise HTTPException(
                 status_code=400,
@@ -1173,7 +1179,6 @@ async def chat_voice(
             except Exception:
                 pass
 
-        # Extra safety: verify file exists and has size
         try:
             sz = os.path.getsize(tmp_path)
         except Exception:
