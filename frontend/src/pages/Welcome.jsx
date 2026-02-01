@@ -14,90 +14,184 @@ export default function Welcome() {
 
   return (
     <div style={styles.page}>
-      <div style={styles.content}>
-        {/* Title */}
-        <h1 style={styles.title}>Better Me</h1>
+      <div style={styles.layout}>
+        {/* LEFT: Brand */}
+        <div style={styles.left}>
+          <h1 style={styles.title}>Better Me</h1>
+          <p style={styles.subtitle}>
+            Your friendly coach to grow confidence, one step at a time.
+          </p>
+        </div>
 
-        {/* Subtitle */}
-        <p style={styles.subtitle}>
-          Your friendly coach to grow confidence, one step at a time.
-        </p>
+        {/* RIGHT: Diagonal split coach chooser */}
+        <div style={styles.right}>
+          <div style={styles.splitCard} aria-label="Choose a coach">
+            {/* Mira side */}
+            <button
+              type="button"
+              onClick={() => pickCoach("mira")}
+              style={{
+                ...styles.halfBase,
+                ...styles.leftHalf,
+                backgroundImage: `url(${coachMira})`,
+              }}
+              aria-label="Choose Mira"
+              title="Mira"
+            >
+              <div style={styles.labelBoxLeft}>
+                <div style={styles.coachName}>Mira</div>
+                <div style={styles.coachVibe}>Compassionate</div>
+              </div>
+            </button>
 
-        {/* Coach cards */}
-        <div style={styles.coachRow}>
-          <button style={styles.coachCard} onClick={() => pickCoach("mira")}>
-            <img src={coachMira} alt="Mira" style={styles.avatar} />
-            <div style={styles.coachName}>Mira</div>
-            <div style={styles.coachDesc}>Compassionate</div>
-          </button>
+            {/* Kai side */}
+            <button
+              type="button"
+              onClick={() => pickCoach("kai")}
+              style={{
+                ...styles.halfBase,
+                ...styles.rightHalf,
+                backgroundImage: `url(${coachKai})`,
+              }}
+              aria-label="Choose Kai"
+              title="Kai"
+            >
+              <div style={styles.labelBoxRight}>
+                <div style={styles.coachName}>Kai</div>
+                <div style={styles.coachVibe}>Empowering</div>
+              </div>
+            </button>
 
-          <button style={styles.coachCard} onClick={() => pickCoach("kai")}>
-            <img src={coachKai} alt="Kai" style={styles.avatar} />
-            <div style={styles.coachName}>Kai</div>
-            <div style={styles.coachDesc}>Empowering</div>
-          </button>
+            {/* soft overlay so it feels like one image */}
+            <div style={styles.glowOverlay} />
+          </div>
+
+          <div style={styles.hint}>Click a side to choose your coach.</div>
         </div>
       </div>
     </div>
   );
 }
 
-/* ---------------- styles ---------------- */
-
 const styles = {
   page: {
     minHeight: "100vh",
     display: "flex",
     alignItems: "center",
-    paddingLeft: "8vw",   // left breathing space
-    paddingRight: 24,
+    padding: "48px 24px",
   },
-  content: {
-    maxWidth: 560,
+  layout: {
+    width: "min(1100px, 96vw)",
+    margin: "0 auto",
+    display: "grid",
+    gridTemplateColumns: "1.05fr 1fr",
+    gap: 36,
+    alignItems: "center",
   },
+
+  left: { textAlign: "left" },
   title: {
-    fontSize: 72,              // MUCH larger
+    margin: 0,
+    fontSize: 80, // bigger
     fontWeight: 900,
-    letterSpacing: "-1.2px",
-    color: "#3a2f2a",          // warm cocoa
-    margin: "0 0 16px 0",
+    letterSpacing: "-1.4px",
+    color: "#3a2f2a", // warm cocoa
+    lineHeight: 1.02,
   },
   subtitle: {
+    margin: "16px 0 0 0",
     fontSize: 18,
     lineHeight: 1.7,
     color: "rgba(58,47,42,0.72)",
-    margin: "0 0 40px 0",
+    maxWidth: 520,
   },
-  coachRow: {
-    display: "flex",
-    gap: 20,
+
+  right: { display: "grid", justifyItems: "end" },
+
+  splitCard: {
+    position: "relative",
+    width: "min(520px, 90vw)",
+    height: 320,
+    borderRadius: 24,
+    overflow: "hidden",
+    border: "1px solid rgba(58,47,42,0.18)",
+    boxShadow: "0 24px 70px rgba(0,0,0,0.12)",
+    background: "rgba(255,255,255,0.55)",
   },
-  coachCard: {
-    width: 220,
-    background: "rgba(255,255,255,0.78)",
-    border: "1px solid rgba(58,47,42,0.25)",
-    borderRadius: 20,
-    padding: "20px 18px",
-    textAlign: "left",        // left aligned card text
+
+  halfBase: {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    border: 0,
+    padding: 0,
+    margin: 0,
     cursor: "pointer",
-    boxShadow: "0 14px 36px rgba(0,0,0,0.10)",
-    transition: "all 140ms ease",
+    backgroundSize: "cover",
+    backgroundPosition: "center",
+    transition: "transform 160ms ease, filter 160ms ease",
+    filter: "saturate(1.05) contrast(1.02)",
   },
-  avatar: {
-    width: 64,
-    height: 64,
-    borderRadius: 999,
-    objectFit: "cover",
-    marginBottom: 14,
-    boxShadow: "0 8px 22px rgba(0,0,0,0.15)",
+
+  // Diagonal split:
+  // left side keeps left triangle-ish region
+  leftHalf: {
+    clipPath: "polygon(0 0, 63% 0, 47% 100%, 0 100%)",
   },
+  // right side keeps right region
+  rightHalf: {
+    clipPath: "polygon(63% 0, 100% 0, 100% 100%, 47% 100%)",
+  },
+
+  // soft overlay to unify image feel
+  glowOverlay: {
+    position: "absolute",
+    inset: 0,
+    pointerEvents: "none",
+    background:
+      "linear-gradient(90deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06) 40%, rgba(255,255,255,0.12))",
+  },
+
+  labelBoxLeft: {
+    position: "absolute",
+    left: 16,
+    bottom: 16,
+    padding: "10px 12px",
+    borderRadius: 14,
+    background: "rgba(255,255,255,0.75)",
+    border: "1px solid rgba(58,47,42,0.18)",
+    backdropFilter: "blur(8px)",
+    textAlign: "left",
+  },
+  labelBoxRight: {
+    position: "absolute",
+    right: 16,
+    bottom: 16,
+    padding: "10px 12px",
+    borderRadius: 14,
+    background: "rgba(255,255,255,0.75)",
+    border: "1px solid rgba(58,47,42,0.18)",
+    backdropFilter: "blur(8px)",
+    textAlign: "left",
+  },
+
   coachName: {
-    fontSize: 18,
-    fontWeight: 800,
+    fontWeight: 900,
     color: "#3a2f2a",
+    fontSize: 16,
+    lineHeight: 1.1,
   },
-  coachDesc: {
-    fontSize: 14,
-    color: "rgba(58,47,42,0.65)",
+  coachVibe: {
+    marginTop: 2,
+    fontSize: 13,
+    color: "rgba(58,47,42,0.68)",
+  },
+
+  hint: {
+    marginTop: 10,
+    fontSize: 13,
+    color: "rgba(58,47,42,0.60)",
+    justifySelf: "end",
   },
 };

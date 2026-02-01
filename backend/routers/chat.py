@@ -41,7 +41,6 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")        # tiny/base/small/medi
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")       # cpu | cuda
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 
-# Minimum size gate to avoid EOFError from truncated uploads
 VOICE_MIN_BYTES = int(os.getenv("VOICE_MIN_BYTES", "1500"))  # ~1.5KB
 
 _whisper_ready = False
@@ -198,7 +197,10 @@ def _safe_read_json(path: Path, fallback: Any) -> Any:
     try:
         if not path.exists():
             return fallback
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return fallback
+        return json.loads(raw)
     except Exception:
         return fallback
 
@@ -234,8 +236,8 @@ class ChatRequest(BaseModel):
     topic: Optional[str] = None
 
 
-# ✅ Fix A: add stable ts (and optional kind) to /chat messages
 class CoachMessage(BaseModel):
+    # NOTE: frontend treats non-"user" as assistant; keep "coach" for readability.
     role: str = "coach"
     text: str
     ts: str
@@ -280,7 +282,6 @@ class HistoryResponse(BaseModel):
 
 
 def _coach_msg(text: str, kind: Optional[str] = "coach") -> CoachMessage:
-    # ✅ Create coach message once with stable ts for Fix A
     return CoachMessage(role="coach", text=text, ts=_now_iso(), kind=kind)
 
 
@@ -300,32 +301,38 @@ DEFAULT_STATE = {
         "locked": False,
     },
     "plans": {},
-    # ✅ 12-hour follow-up tracking (Option B)
     "followup": {
-        "pending_at": None,         # ISO UTC
-        "pending_for_ts": None,     # user message ts that scheduled this check-in
-        "last_sent_at": None,       # ISO UTC
+        "pending_at": None,
+        "pending_for_ts": None,
+        "last_sent_at": None,
     },
-    # ✅ NEW: server-side baseline gating (tiny + isolated)
     "gates": {
         "awaiting_baseline_for": None,  # topic_key or None
-        "pending_plan_topic": None,     # topic_key or None (resume plan flow after baseline)
+        "pending_plan_topic": None,     # topic_key or None
     },
 }
 
 
 def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     merged = json.loads(json.dumps(DEFAULT_STATE))
-    for k, v in state.items():
+    for k, v in (state or {}).items():
         merged[k] = v
 
     merged.setdefault("history", [])
+    if not isinstance(merged["history"], list):
+        merged["history"] = []
+
     merged.setdefault("metrics", {"confidence": {}})
     merged["metrics"].setdefault("confidence", {})
+
     merged.setdefault("plan_build", {})
     for k, v in DEFAULT_STATE["plan_build"].items():
         merged["plan_build"].setdefault(k, v)
+
     merged.setdefault("plans", {})
+    if not isinstance(merged["plans"], dict):
+        merged["plans"] = {}
+
     merged.setdefault("followup", {})
     for k, v in DEFAULT_STATE["followup"].items():
         merged["followup"].setdefault(k, v)
@@ -334,9 +341,17 @@ def _ensure_state_shape(state: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in DEFAULT_STATE["gates"].items():
         merged["gates"].setdefault(k, v)
 
+    # Make sure every history row has required fields (prevents /history crashing)
+    repaired: List[Dict[str, Any]] = []
     for m in merged.get("history", []):
-        if isinstance(m, dict):
-            m.setdefault("kind", None)
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "").strip() or "coach"
+        text = str(m.get("text") or "").strip()
+        ts = str(m.get("ts") or "").strip() or _now_iso()
+        kind = m.get("kind")
+        repaired.append({"role": role, "text": text, "ts": ts, "kind": kind})
+    merged["history"] = repaired[-120:]
 
     return merged
 
@@ -361,7 +376,6 @@ _NEW_PLAN_PATTERNS = [
     r"\bthis plan (doesn'?t|does not) work\b",
 ]
 
-# Hard plan intents only (avoid casual "help me" triggering planning)
 _PLAN_REQUEST_PATTERNS = [
     r"\bplan\b",
     r"\broadmap\b",
@@ -422,28 +436,19 @@ def skip_requested(user_text: str) -> bool:
 
 
 def plan_requested(user_text: str) -> bool:
-    """
-    Only enter plan flow when the user is clearly asking for a plan.
-    Avoid triggering PLAN_BUILD for casual 'help me ...' chat.
-    """
     if is_greeting(user_text):
         return False
-
     t = (user_text or "").strip().lower()
     if not t:
         return False
-
     if skip_requested(user_text):
         return False
-
     if _matches_any(user_text, _PLAN_REQUEST_PATTERNS):
         return True
-
     if "help me" in t:
         if any(k in t for k in ["plan", "roadmap", "next steps", "action items", "steps", "schedule", "checklist"]):
             return True
         return False
-
     return False
 
 
@@ -466,7 +471,6 @@ def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
 
 def infer_topic_key(user_text: str, profile: Optional[Dict[str, Any]] = None) -> str:
     t = (user_text or "").lower()
-
     if is_greeting(user_text):
         return "general"
 
@@ -499,7 +503,6 @@ DISCOVERY_QUESTIONS = [
 def decide_mode_and_step(state: Dict[str, Any], user_text: str, topic_key: str) -> Tuple[str, Optional[str]]:
     if is_greeting(user_text):
         return "CHAT", None
-
     if skip_requested(user_text):
         return "CHAT", None
 
@@ -528,7 +531,6 @@ def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str
     pb = state["plan_build"]
     active_id = pb.get("active_plan_id")
     active_topic = pb.get("topic")
-
     if not active_id:
         return True
     if active_topic != topic_key:
@@ -539,76 +541,7 @@ def should_create_new_plan(state: Dict[str, Any], user_text: str, topic_key: str
 
 
 # ===========================
-# Learning resources
-# ===========================
-RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
-    "mlops": [
-        {
-            "title": "Google Cloud: MLOps (CD/CT pipelines) overview",
-            "url": "https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning",
-            "type": "doc",
-        },
-        {
-            "title": "Vertex AI: MLOps & pipelines (overview)",
-            "url": "https://cloud.google.com/vertex-ai/docs/pipelines/introduction",
-            "type": "doc",
-        },
-        {"title": "MLflow Tracking (official docs)", "url": "https://mlflow.org/docs/latest/tracking.html", "type": "doc"},
-        {"title": "Model monitoring concepts (Vertex AI)", "url": "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview", "type": "doc"},
-    ],
-    "system_design": [
-        {"title": "Google Cloud Architecture Center", "url": "https://cloud.google.com/architecture", "type": "doc"},
-        {"title": "Google SRE Workbook (reliability patterns)", "url": "https://sre.google/workbook/table-of-contents/", "type": "book"},
-    ],
-    "data_engineering": [
-        {"title": "BigQuery documentation", "url": "https://cloud.google.com/bigquery/docs", "type": "doc"},
-        {"title": "BigQuery best practices", "url": "https://cloud.google.com/bigquery/docs/best-practices-performance-overview", "type": "doc"},
-        {"title": "Cloud Storage documentation", "url": "https://cloud.google.com/storage/docs", "type": "doc"},
-    ],
-    "kubernetes": [
-        {"title": "Kubernetes Basics", "url": "https://kubernetes.io/docs/tutorials/kubernetes-basics/", "type": "doc"},
-        {"title": "Kubernetes Deployments", "url": "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/", "type": "doc"},
-    ],
-    "interview": [
-        {"title": "STAR interview method (overview)", "url": "https://en.wikipedia.org/wiki/Situation,_task,_action,_result", "type": "article"},
-        {"title": "System design primer (GitHub)", "url": "https://github.com/donnemartin/system-design-primer", "type": "repo"},
-    ],
-}
-
-
-def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
-    t = (task_text or "").lower()
-    picks: List[Dict[str, str]] = []
-
-    if any(k in t for k in ["mlops", "pipeline", "deployment", "serving", "monitor", "drift", "registry", "version"]):
-        picks += RESOURCE_CATALOG["mlops"]
-    if any(k in t for k in ["bigquery", "sql", "etl", "elt", "warehouse", "dataflow", "spark", "composer", "airflow", "gcs", "storage"]):
-        picks += RESOURCE_CATALOG["data_engineering"]
-    if any(k in t for k in ["system design", "architecture", "trade-off", "latency", "throughput", "reliability", "scalability"]):
-        picks += RESOURCE_CATALOG["system_design"]
-    if any(k in t for k in ["k8s", "kubernetes", "helm", "pod", "service mesh"]):
-        picks += RESOURCE_CATALOG["kubernetes"]
-    if any(k in t for k in ["behavioral", "star", "mock interview", "interview", "tell me about yourself"]):
-        picks += RESOURCE_CATALOG["interview"]
-
-    if not picks and topic_key == "interview_confidence":
-        picks += RESOURCE_CATALOG["interview"] + RESOURCE_CATALOG["system_design"] + RESOURCE_CATALOG["mlops"]
-
-    seen = set()
-    out: List[Dict[str, str]] = []
-    for r in picks:
-        url = r.get("url")
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        out.append(r)
-        if len(out) >= max_items:
-            break
-    return out
-
-
-# ===========================
-# Follow-up (Option B)
+# Follow-up
 # ===========================
 def _parse_iso(s: Optional[str]) -> Optional[datetime]:
     if not s:
@@ -664,16 +597,38 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
 
 
 # ===========================
-# Gemini helpers
+# Gemini helper (strong identity)
 # ===========================
+def _coach_identity(coach_id: Optional[str]) -> Tuple[str, str]:
+    c = (coach_id or "").lower().strip()
+    if c in ["kai", "male", "coach_kai"]:
+        # IMPORTANT: identity lock
+        name = "Kai"
+        persona = (
+            "You are Coach Kai (male). Friendly, direct, calm. Short sentences. Practical steps. "
+            "Supportive but not overly bubbly."
+        )
+    else:
+        name = "Mira"
+        persona = (
+            "You are Coach Mira (female). Warm, encouraging, conversational. Short and natural. "
+            "Practical steps. Gentle confidence-building tone."
+        )
+    return name, persona
+
+
 def gemini_text(system: str, user: str) -> str:
+    """
+    Note: Google genai SDK here doesn't support a strict system role the same way OpenAI does in all modes.
+    We hard-prefix a "SYSTEM:" block and include identity lock text to reduce drift.
+    """
     try:
         resp = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=[
                 types.Content(
                     role="user",
-                    parts=[types.Part(text=f"{system}\n\nUSER:\n{user}")]
+                    parts=[types.Part(text=f"SYSTEM:\n{system}\n\nUSER:\n{user}")]
                 )
             ],
             config=types.GenerateContentConfig(temperature=0.7, max_output_tokens=700),
@@ -710,7 +665,7 @@ def extract_bullets(text: str, max_items: int = 10) -> List[str]:
 
 
 # ===========================
-# Confidence capture
+# Confidence capture (1-10)
 # ===========================
 def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
     t = (user_text or "").strip().lower()
@@ -718,7 +673,7 @@ def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: s
     if not m:
         return False
     val = int(m.group(1))
-    if val < 0 or val > 10:
+    if val < 1 or val > 10:
         return False
 
     conf = state["metrics"]["confidence"].setdefault(topic_key, {})
@@ -745,32 +700,34 @@ def _baseline_prompt(topic_key: str) -> str:
 
 def _ensure_baseline_gate(state: Dict[str, Any], user_text: str, topic_key: str) -> Optional[ChatResponse]:
     """
-    Server-side safety net:
-    - If user asks for a plan but no baseline exists, prompt baseline and DO NOT build a plan yet.
-    - Remember that a plan was requested, so once baseline arrives we can resume PLAN_BUILD.
+    If user asks for a plan but no baseline exists, prompt baseline ONCE and block plan-building.
+    Critical: do NOT spam the same prompt into history repeatedly.
     """
     if not plan_requested(user_text) and not explicit_new_plan_request(user_text):
         return None
 
     if _has_baseline(state, topic_key):
-        # baseline exists -> no gate
         state["gates"]["awaiting_baseline_for"] = None
         state["gates"]["pending_plan_topic"] = None
         return None
 
     gates = state.setdefault("gates", {})
-    # If we're already awaiting baseline for this topic, don't spam the same prompt again.
-    if gates.get("awaiting_baseline_for") == topic_key:
+    already_waiting = (gates.get("awaiting_baseline_for") == topic_key)
+
+    gates["awaiting_baseline_for"] = topic_key
+    gates["pending_plan_topic"] = topic_key
+    state["gates"] = gates
+
+    if already_waiting:
+        # IMPORTANT: return no new coach message (frontend already shows the prompt)
         return ChatResponse(
-            messages=[_coach_msg(_baseline_prompt(topic_key), kind="baseline_prompt")],
+            messages=[],
             ui=UIState(mode="CHAT", show_plan_sidebar=True),
             effects=Effects(saved_confidence=False),
             plan=None,
         )
 
-    gates["awaiting_baseline_for"] = topic_key
-    gates["pending_plan_topic"] = topic_key
-
+    # First time: send the prompt once
     return ChatResponse(
         messages=[_coach_msg(_baseline_prompt(topic_key), kind="baseline_prompt")],
         ui=UIState(mode="CHAT", show_plan_sidebar=True),
@@ -780,15 +737,81 @@ def _ensure_baseline_gate(state: Dict[str, Any], user_text: str, topic_key: str)
 
 
 # ===========================
-# Plan primitives
+# Learning resources
 # ===========================
-def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_text: str) -> Dict[str, Any]:
+RESOURCE_CATALOG: Dict[str, List[Dict[str, str]]] = {
+    "mlops": [
+        {"title": "Google Cloud: MLOps (CD/CT pipelines) overview", "url": "https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning", "type": "doc"},
+        {"title": "Vertex AI: MLOps & pipelines (overview)", "url": "https://cloud.google.com/vertex-ai/docs/pipelines/introduction", "type": "doc"},
+        {"title": "MLflow Tracking (official docs)", "url": "https://mlflow.org/docs/latest/tracking.html", "type": "doc"},
+        {"title": "Model monitoring concepts (Vertex AI)", "url": "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview", "type": "doc"},
+    ],
+    "system_design": [
+        {"title": "Google Cloud Architecture Center", "url": "https://cloud.google.com/architecture", "type": "doc"},
+        {"title": "Google SRE Workbook (reliability patterns)", "url": "https://sre.google/workbook/table-of-contents/", "type": "book"},
+    ],
+    "data_engineering": [
+        {"title": "BigQuery documentation", "url": "https://cloud.google.com/bigquery/docs", "type": "doc"},
+        {"title": "BigQuery best practices", "url": "https://cloud.google.com/bigquery/docs/best-practices-performance-overview", "type": "doc"},
+        {"title": "Cloud Storage documentation", "url": "https://cloud.google.com/storage/docs", "type": "doc"},
+    ],
+    "kubernetes": [
+        {"title": "Kubernetes Basics", "url": "https://kubernetes.io/docs/tutorials/kubernetes-basics/", "type": "doc"},
+        {"title": "Kubernetes Deployments", "url": "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/", "type": "doc"},
+    ],
+    "interview": [
+        {"title": "STAR interview method (overview)", "url": "https://en.wikipedia.org/wiki/Situation,_task,_action,_result", "type": "article"},
+        {"title": "System design primer (GitHub)", "url": "https://github.com/donnemartin/system-design-primer", "type": "repo"},
+    ],
+}
+
+
+def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[Dict[str, str]]:
+    t = (task_text or "").lower()
+    picks: List[Dict[str, str]] = []
+
+    if any(k in t for k in ["mlops", "pipeline", "deployment", "serving", "monitor", "drift", "registry", "version"]):
+        picks += RESOURCE_CATALOG["mlops"]
+    if any(k in t for k in ["bigquery", "sql", "etl", "elt", "warehouse", "dataflow", "spark", "composer", "airflow", "gcs", "storage"]):
+        picks += RESOURCE_CATALOG["data_engineering"]
+    if any(k in t for k in ["system design", "architecture", "trade-off", "latency", "throughput", "reliability", "scalability"]):
+        picks += RESOURCE_CATALOG["system_design"]
+    if any(k in t for k in ["k8s", "kubernetes", "helm", "pod", "service mesh"]):
+        picks += RESOURCE_CATALOG["kubernetes"]
+    if any(k in t for k in ["behavioral", "star", "mock interview", "interview", "tell me about yourself"]):
+        picks += RESOURCE_CATALOG["interview"]
+
+    if not picks and topic_key == "interview_confidence":
+        picks += RESOURCE_CATALOG["interview"] + RESOURCE_CATALOG["system_design"] + RESOURCE_CATALOG["mlops"]
+
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for r in picks:
+        url = r.get("url")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(r)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+# ===========================
+# Plan primitives (NOW coach-aware)
+# ===========================
+def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_text: str, coach_id: Optional[str]) -> Dict[str, Any]:
+    coach_name, coach_persona = _coach_identity(coach_id)
+
     deadline = discovery_answers.get("deadline") or "soon"
     target = discovery_answers.get("target") or "mixed"
 
+    # Identity lock in planning too
     system = (
-        "You are a practical, concise coach. Suggest a simple plan. "
-        "Return ONLY a bullet list of actionable tasks (no headings, no paragraphs). "
+        f"{coach_persona}\n"
+        f"Identity lock: You are Coach {coach_name}. Never claim to be any other coach.\n\n"
+        "You are a practical, concise coach. Suggest a simple plan.\n"
+        "Return ONLY a bullet list of actionable tasks (no headings, no paragraphs).\n"
         "Tasks should be specific and doable in 30–90 minutes."
     )
     user = (
@@ -857,20 +880,9 @@ def plan_to_mermaid(plan: Dict[str, Any]) -> str:
 # ===========================
 # Mode handlers
 # ===========================
-def _coach_style(coach_id: Optional[str]) -> str:
-    c = (coach_id or "").lower().strip()
-    if c in ["kai", "male", "coach_kai"]:
-        return (
-            "You are Coach Kai (male). Friendly, direct, calm. "
-            "Short sentences. Practical steps. Supportive but not overly bubbly."
-        )
-    return (
-        "You are Coach Mira (female). Warm, encouraging, conversational. "
-        "Short and natural. Practical steps. Gentle confidence-building tone."
-    )
-
-
 def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_conf: bool, coach_id: Optional[str]) -> ChatResponse:
+    coach_name, coach_persona = _coach_identity(coach_id)
+
     pb = state["plan_build"]
     plan_id = pb.get("active_plan_id") if pb.get("topic") == topic_key else None
     has_plan = bool(plan_id) and plan_id in state["plans"]
@@ -885,11 +897,15 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
             plan=plan,
         )
 
+    # Strong identity lock
     system = (
-        f"{_coach_style(coach_id)}\n\n"
-        "You are a helpful coach. Keep responses short and natural. "
-        "Do NOT create a plan unless user asks for one. "
-        "If user is choosing a specific step from an existing plan, help them execute it with 3–6 concrete substeps. "
+        f"{coach_persona}\n"
+        f"Identity lock: You are Coach {coach_name}. "
+        "Never claim you are Mira if you are Kai, and never claim you are Kai if you are Mira. "
+        "Never introduce yourself as the other coach.\n\n"
+        "You are a helpful coach. Keep responses short and natural.\n"
+        "Do NOT create a plan unless the user explicitly asks for a plan.\n"
+        "If the user is choosing a specific step from an existing plan, help them execute it with 3–6 concrete substeps.\n"
         "Avoid repeating the plan."
     )
 
@@ -938,7 +954,13 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
 
     if q_asked >= len(DISCOVERY_QUESTIONS):
         pb["step"] = "DRAFT"
-        return handle_plan_draft(state, user_text, topic_key)
+        # NOTE: draft will be called by caller with coach_id
+        return ChatResponse(
+            messages=[_coach_msg("Thanks — give me one moment and I’ll build your plan.")],
+            ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True),
+            effects=Effects(),
+            plan=None,
+        )
 
     question = DISCOVERY_QUESTIONS[q_asked]
     pb["discovery_questions_asked"] = q_asked + 1
@@ -952,7 +974,7 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
     )
 
 
-def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
+def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str, coach_id: Optional[str]) -> ChatResponse:
     pb = state["plan_build"]
     pb["topic"] = topic_key
     pb["step"] = "DRAFT"
@@ -974,7 +996,7 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
             plan=None,
         )
 
-    plan = build_plan_object(topic_key, pb.get("discovery_answers") or {}, user_text)
+    plan = build_plan_object(topic_key, pb.get("discovery_answers") or {}, user_text, coach_id=coach_id)
     state["plans"][plan["id"]] = plan
     pb["active_plan_id"] = plan["id"]
     pb["locked"] = True
@@ -998,7 +1020,9 @@ def handle_plan_draft(state: Dict[str, Any], user_text: str, topic_key: str) -> 
     )
 
 
-def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) -> ChatResponse:
+def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str, coach_id: Optional[str]) -> ChatResponse:
+    coach_name, coach_persona = _coach_identity(coach_id)
+
     pb = state["plan_build"]
     pb["topic"] = topic_key
     pb["step"] = "REFINE"
@@ -1007,7 +1031,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
     if not plan_id or plan_id not in state["plans"]:
         pb["step"] = "DRAFT"
         pb["locked"] = False
-        return handle_plan_draft(state, user_text, topic_key)
+        return handle_plan_draft(state, user_text, topic_key, coach_id=coach_id)
 
     plan = state["plans"][plan_id]
 
@@ -1016,7 +1040,7 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
         pb["step"] = "DRAFT"
         pb["discovery_questions_asked"] = 0
         pb["discovery_answers"] = {}
-        return handle_plan_draft(state, user_text, topic_key)
+        return handle_plan_draft(state, user_text, topic_key, coach_id=coach_id)
 
     if not refine_requested(user_text):
         state["mode"] = "CHAT"
@@ -1028,15 +1052,17 @@ def handle_plan_refine(state: Dict[str, Any], user_text: str, topic_key: str) ->
         )
 
     system = (
-        "You are editing an existing plan. Do NOT create a new plan. "
-        "Given the user's request, propose up to 5 concrete edits to tasks. "
-        "Return ONLY a bullet list of edits using one of these verbs at the start: "
+        f"{coach_persona}\n"
+        f"Identity lock: You are Coach {coach_name}. Never claim to be another coach.\n\n"
+        "You are editing an existing plan. Do NOT create a new plan.\n"
+        "Given the user's request, propose up to 5 concrete edits to tasks.\n"
+        "Return ONLY a bullet list of edits using one of these verbs at the start:\n"
         "'ADD:', 'REMOVE:', 'CHANGE:', 'REORDER:'."
     )
     user = (
         f"Plan title: {plan.get('title')}\n"
         f"Existing tasks:\n"
-        + "\n".join([f"- {t['text']}" for t in (plan.get("tasks") or [])][:12])
+        + "\n".join([f"- {t['text']}" for t in (plan.get('tasks') or [])][:12])
         + "\n\nUser request:\n"
         + user_text
     )
@@ -1151,21 +1177,18 @@ def process_chat_message(
     # Capture confidence if user sent a number
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
-    # ✅ If we were awaiting baseline and we got it, clear the gate (and resume plan if pending)
     gates = state.get("gates") or {}
     awaiting_for = gates.get("awaiting_baseline_for")
     pending_plan_topic = gates.get("pending_plan_topic")
 
     if saved_conf and awaiting_for == topic_key:
         gates["awaiting_baseline_for"] = None
-        # keep pending_plan_topic to resume below
         state["gates"] = gates
 
-    # ✅ Enforce baseline-before-plan (server-side)
-    # If user is asking for plan and baseline missing, respond with baseline prompt and stop.
+    # Baseline gate (prompt ONCE)
     gate_resp = _ensure_baseline_gate(state, user_text, topic_key)
     if gate_resp is not None:
-        # Persist coach reply to history (same ts/kind)
+        # Persist only if we actually returned a new coach message
         if gate_resp.messages:
             m0 = gate_resp.messages[0]
             state["history"].append({"role": "coach", "text": m0.text, "ts": m0.ts, "kind": (m0.kind or "coach")})
@@ -1176,13 +1199,11 @@ def process_chat_message(
         _save_all_state(all_state)
         return gate_resp
 
-    # ✅ If baseline just arrived and a plan was pending for this topic, jump into PLAN_BUILD
+    # If baseline just arrived and a plan was pending, start discovery cleanly
     if saved_conf and pending_plan_topic == topic_key:
-        # Clear pending flag now (avoid loops)
         gates["pending_plan_topic"] = None
         state["gates"] = gates
 
-        # Reset discovery to start clean
         pb = state["plan_build"]
         pb["topic"] = topic_key
         pb["step"] = "DISCOVERY"
@@ -1192,19 +1213,32 @@ def process_chat_message(
         state["mode"] = "PLAN_BUILD"
 
         resp = handle_plan_discovery(state, user_text, topic_key)
+
+        # If discovery immediately completed (rare), draft
+        if state["plan_build"].get("step") == "DRAFT" and state["plan_build"].get("discovery_questions_asked", 0) >= len(DISCOVERY_QUESTIONS):
+            resp = handle_plan_draft(state, user_text, topic_key, coach_id=coach)
+
     else:
         mode, step = decide_mode_and_step(state, user_text, topic_key)
         state["mode"] = mode
 
         if mode == "CHAT":
             resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
+
         elif mode == "PLAN_BUILD":
             if step == "DISCOVERY":
                 resp = handle_plan_discovery(state, user_text, topic_key)
+
+                # if we just finished discovery, draft plan
+                pb = state["plan_build"]
+                if pb.get("step") == "DRAFT" or (pb.get("discovery_questions_asked", 0) >= len(DISCOVERY_QUESTIONS)):
+                    resp = handle_plan_draft(state, user_text, topic_key, coach_id=coach)
+
             elif step == "DRAFT":
-                resp = handle_plan_draft(state, user_text, topic_key)
+                resp = handle_plan_draft(state, user_text, topic_key, coach_id=coach)
             else:
-                resp = handle_plan_refine(state, user_text, topic_key)
+                resp = handle_plan_refine(state, user_text, topic_key, coach_id=coach)
+
         else:
             state["mode"] = "CHAT"
             resp = handle_chat(state, user_text, topic_key, saved_conf, coach_id=coach)
@@ -1237,7 +1271,7 @@ def chat(req: ChatRequest) -> ChatResponse:
 
 
 # ===========================
-# History endpoint
+# History endpoint (NEVER crash)
 # ===========================
 @router.get("/history", response_model=HistoryResponse)
 def chat_history(
@@ -1245,20 +1279,37 @@ def chat_history(
     topic: Optional[str] = None,
     coach: Optional[str] = None,
 ) -> HistoryResponse:
-    all_state = _load_all_state()
-    bucket = _get_user_bucket(all_state, user_id)
-    state = _ensure_state_shape(bucket)
+    try:
+        all_state = _load_all_state()
+        bucket = _get_user_bucket(all_state, user_id)
+        state = _ensure_state_shape(bucket)
 
-    topic_key = normalize_topic_key(topic) or "general"
+        topic_key = normalize_topic_key(topic) or "general"
 
-    _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
+        _inject_due_followup_if_needed(state, coach_id=coach, topic_key=topic_key)
 
-    bucket.clear()
-    bucket.update(state)
-    _save_all_state(all_state)
+        # Persist repaired state so we don't keep crashing on old rows
+        bucket.clear()
+        bucket.update(state)
+        _save_all_state(all_state)
 
-    msgs = [HistoryMessage(**m) for m in state.get("history", [])]
-    return HistoryResponse(topic=topic_key, messages=msgs)
+        msgs: List[HistoryMessage] = []
+        for m in state.get("history", []):
+            if not isinstance(m, dict):
+                continue
+            role = str(m.get("role") or "coach")
+            text = str(m.get("text") or "")
+            ts = str(m.get("ts") or "") or _now_iso()
+            kind = m.get("kind")
+            # Always append safely (no Pydantic crash)
+            msgs.append(HistoryMessage(role=role, text=text, ts=ts, kind=kind))
+
+        return HistoryResponse(topic=topic_key, messages=msgs)
+    except Exception as e:
+        # IMPORTANT: never 500/502 this endpoint
+        print("❌ /chat/history failed:", repr(e))
+        traceback.print_exc()
+        return HistoryResponse(topic=normalize_topic_key(topic) or "general", messages=[])
 
 
 # ===========================

@@ -336,53 +336,113 @@ function ConversationPlansSidebar({ plans = [] }) {
 // -----------------------
 // Speak coach (TTS)
 // -----------------------
-function speakCoach(text) {
+let _voicesCache = [];
+let _ttsUnlocked = false;
+
+export function unlockSpeech() {
   try {
     if (!window?.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+    _ttsUnlocked = true;
+  } catch {}
+}
+
+function _loadVoices() {
+  try {
+    if (!window?.speechSynthesis?.getVoices) return [];
+    const v = window.speechSynthesis.getVoices() || [];
+    _voicesCache = v;
+    return v;
+  } catch {
+    return [];
+  }
+}
+
+if (typeof window !== "undefined" && window?.speechSynthesis) {
+  _loadVoices();
+  window.speechSynthesis.onvoiceschanged = () => {
+    _loadVoices();
+  };
+}
+
+function _pickVoice({ coachId = "mira", preferredVoiceName = null } = {}) {
+  const voices = _voicesCache.length ? _voicesCache : _loadVoices();
+  if (!voices.length) return null;
+
+  if (preferredVoiceName) {
+    const exact = voices.find((v) => v.name === preferredVoiceName);
+    if (exact) return exact;
+  }
+
+  const isKai = String(coachId || "").toLowerCase().includes("kai");
+
+  const english = voices.filter((v) => /en/i.test(v.lang));
+  const pool = english.length ? english : voices;
+
+  const maleHints = /(male|man|david|mark|alex|daniel|tom|fred|george|john|microsoft david)/i;
+  const femaleHints = /(female|woman|zira|susan|samantha|victoria|karen|moira|tessa|veena)/i;
+
+  if (isKai) {
+    return (
+      pool.find((v) => /en-US/i.test(v.lang) && maleHints.test(v.name)) ||
+      pool.find((v) => maleHints.test(v.name)) ||
+      pool.find((v) => /en-US/i.test(v.lang) && !femaleHints.test(v.name)) ||
+      pool.find((v) => !femaleHints.test(v.name)) ||
+      pool[0]
+    );
+  }
+
+  return (
+    pool.find((v) => /en-US/i.test(v.lang) && femaleHints.test(v.name)) ||
+    pool.find((v) => femaleHints.test(v.name)) ||
+    pool.find((v) => /en-US/i.test(v.lang)) ||
+    pool[0]
+  );
+}
+
+export function speakCoach(text, opts = {}) {
+  try {
+    if (!window?.speechSynthesis) return;
+
+    const enabled = opts.enabled !== false;
+    if (!enabled) return;
 
     const s = String(text || "").trim();
     if (!s) return;
 
-    // ✅ avoid speaking code blocks / super long content
     const safe = s.length > 900 ? s.slice(0, 900) : s;
 
-    const trySpeak = (attempt = 0) => {
+    const preferredVoiceName =
+      (typeof localStorage !== "undefined" && localStorage.getItem("tts_voice_name")) || null;
+
+    const coachId = opts.coachId || "mira";
+    const chosen = _pickVoice({ coachId, preferredVoiceName });
+
+    window.speechSynthesis.cancel();
+
+    const u = new SpeechSynthesisUtterance(safe);
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    u.lang = "en-US";
+    if (chosen) u.voice = chosen;
+
+    setTimeout(() => {
       try {
-        const voices = window.speechSynthesis.getVoices?.() || [];
-
-        if (!voices.length && attempt < 6) {
-          setTimeout(() => trySpeak(attempt + 1), 250);
-          return;
-        }
-
-        window.speechSynthesis.cancel();
-
-        const u = new SpeechSynthesisUtterance(safe);
-        u.rate = 1.0;
-        u.pitch = 1.0;
-        u.lang = "en-US";
-
-        const preferred =
-          voices.find((v) => /en/i.test(v.lang) && /female|woman|zira|susan|samantha|victoria/i.test(v.name)) ||
-          voices.find((v) => /en/i.test(v.lang)) ||
-          voices[0];
-
-        if (preferred) u.voice = preferred;
-
-        setTimeout(() => {
-          try {
-            window.speechSynthesis.speak(u);
-          } catch {}
-        }, 0);
+        window.speechSynthesis.speak(u);
       } catch {}
-    };
+    }, 0);
 
-    trySpeak(0);
+    // keep a hint flag; some browsers block until user gesture
+    if (!_ttsUnlocked) {
+      // no-op, but we don't throw
+    }
   } catch {}
 }
 
 // ✅ Apply backend /chat response into UI messages + plans
-// Fix A: attach backend_key so /history merge won't duplicate assistant messages
 function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, needLabel) {
   const ui = data.ui || {};
   const uiState = {
@@ -419,7 +479,6 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
           };
         }
 
-        // ✅ normalize backend role
         let roleRaw = String(m?.role || "assistant").toLowerCase().trim();
         if (roleRaw === "coach") roleRaw = "assistant";
 
@@ -430,10 +489,7 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
 
         const backend_key = `${ts}|${roleRaw}|${kind}|${text}`;
 
-        // ✅ treat normalized assistant as speakable
-        if (roleRaw === "assistant") {
-          lastAssistantText = text;
-        }
+        if (roleRaw === "assistant") lastAssistantText = text;
 
         if (roleRaw === "user") {
           return {
@@ -511,21 +567,12 @@ export default function Chat() {
     setProfile(getProfile() || {});
   }, []);
 
-  // --- TTS voice init (fix silent speech) ---
-  const ttsReadyRef = useRef(false);
-
+  // --- TTS voice init ---
   useEffect(() => {
     try {
       if (!window?.speechSynthesis) return;
-
-      const warm = () => {
-        window.speechSynthesis.getVoices();
-        ttsReadyRef.current = true;
-      };
-
-      warm();
-      window.speechSynthesis.onvoiceschanged = warm;
-
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
       return () => {
         window.speechSynthesis.onvoiceschanged = null;
       };
@@ -544,7 +591,6 @@ export default function Chat() {
   const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
 
-  // need selection (localStorage)
   const needKeyStorage = `bc_need_${userId}_${focus}`;
   const customNeedLabelStorage = `bc_need_custom_label_${userId}_${focus}`;
   const activeNeedStorage = `bc_active_need_${userId}_${focus}`;
@@ -584,19 +630,10 @@ export default function Chat() {
 
   const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
 
-  // per-need chat storage
   const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
-
-  // persistent across app
   const plansKey = `bc_plans_${userId}`;
-
-  // conversation plans (sessionStorage)
   const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
-
-  // confidence per focus + need
   const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
-
-  // UI state across navigation
   const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
@@ -606,7 +643,6 @@ export default function Chat() {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  // Prevent double-send
   const sendingRef = useRef(false);
   const reqSeqRef = useRef(0);
 
@@ -617,13 +653,11 @@ export default function Chat() {
   const [convPlansHydrated, setConvPlansHydrated] = useState(false);
   const [chatHydrated, setChatHydrated] = useState(false);
 
-  // confidence UX
   const [awaitingBaseline, setAwaitingBaseline] = useState(() => loadSession(`${uiKey}_awaitBaseline`, false));
   const [awaitingBaselineReason, setAwaitingBaselineReason] = useState(() => loadSession(`${uiKey}_awaitBaselineReason`, false));
   const [awaitingDailyProgress, setAwaitingDailyProgress] = useState(() => loadSession(`${uiKey}_awaitDailyProgress`, false));
   const [awaitingDailyConfidence, setAwaitingDailyConfidence] = useState(() => loadSession(`${uiKey}_awaitDailyConfidence`, false));
 
-  // backend ui
   const [backendUI, setBackendUI] = useState(() =>
     loadSession(`${uiKey}_backendUI`, { mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null })
   );
@@ -638,18 +672,15 @@ export default function Chat() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
 
-  // ✅ helper: any prompt currently blocking normal chat?
   function anyPromptActive() {
     return awaitingBaseline || awaitingBaselineReason || awaitingDailyProgress || awaitingDailyConfidence;
   }
 
-  // ✅ helper: read baseline from local storage
   function getLocalBaseline() {
     const conf = loadSaved(confidenceKey, null);
     return conf && typeof conf.baseline === "number" ? conf.baseline : null;
   }
 
-  // ✅ helper: show baseline prompt immediately
   function promptBaselineNow() {
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
@@ -664,32 +695,32 @@ export default function Chat() {
       kind: "baseline_prompt",
       mode: "coach",
       message: `Before I build a plan for **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
+      ts: new Date().toISOString(),
     });
   }
 
-  // ✅ FIX: boolean return
   function userAskedForPlan(text) {
     const t = String(text || "").toLowerCase();
     return /\b(plan|steps|roadmap|action items|what should i do|next steps|schedule)\b/.test(t);
   }
 
-  // ✅ NEW: voice reminder is a SYSTEM message and upserted (no duplicates)
   function upsertVoiceBaselineReminder() {
     const baseline = getLocalBaseline();
     if (baseline != null) return;
-    if (awaitingBaseline || awaitingBaselineReason) return; // don't stack prompts
+    if (awaitingBaseline || awaitingBaselineReason) return;
     upsertSystemMessage(setMessages, {
       id: `system_voice_note_${focus}_${needSlug}`,
       role: "assistant",
       type: "system",
       kind: "voice_baseline_note",
       mode: "coach",
-      message: "Quick note: if you’re going to ask for a plan, I’ll need your 1–10 confidence baseline first. You can also type a number anytime (like “6”).",
+      message:
+        "Quick note: if you’re going to ask for a plan, I’ll need your 1–10 confidence baseline first. You can also type a number anytime (like “6”).",
       ts: new Date().toISOString(),
     });
   }
 
-  // ✅ Load local cached chat immediately, then sync backend history (Option B)
+  // ✅ Load local cached chat immediately, then sync backend history
   useEffect(() => {
     setChatHydrated(false);
 
@@ -706,7 +737,6 @@ export default function Chat() {
         });
 
         const hist = Array.isArray(res.data?.messages) ? res.data.messages : [];
-
         const incoming = hist
           .map(historyRowToUiMessage)
           .filter((m) => m.role === "assistant" && (m.fromBackend || m.backend_key));
@@ -726,39 +756,33 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatKey, userId, focus, needKey, customNeedLabel, coachId, awaitingBaseline, awaitingBaselineReason]);
 
-  // Persist chat
   useEffect(() => {
     save(chatKey, messages);
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [messages, chatKey]);
 
-  // Load global plans
   useEffect(() => {
     const p = loadSaved(plansKey, []);
     setPlans(Array.isArray(p) ? p : []);
     setPlansHydrated(true);
   }, [plansKey]);
 
-  // Load conversation plans
   useEffect(() => {
     const savedConv = loadSession(convPlansKey, []);
     setConvPlans(Array.isArray(savedConv) ? savedConv : []);
     setConvPlansHydrated(true);
   }, [convPlansKey]);
 
-  // Persist global plans
   useEffect(() => {
     if (!plansHydrated) return;
     save(plansKey, plans);
   }, [plansKey, plans, plansHydrated]);
 
-  // Persist conversation plans
   useEffect(() => {
     if (!convPlansHydrated) return;
     saveSession(convPlansKey, convPlans);
   }, [convPlansKey, convPlans, convPlansHydrated]);
 
-  // Persist need selection
   useEffect(() => {
     save(needKeyStorage, needKey);
   }, [needKeyStorage, needKey]);
@@ -767,7 +791,6 @@ export default function Chat() {
     save(customNeedLabelStorage, customNeedLabel);
   }, [customNeedLabelStorage, customNeedLabel]);
 
-  // Persist UI state
   useEffect(() => saveSession(`${uiKey}_draft`, input), [uiKey, input]);
   useEffect(() => saveSession(`${uiKey}_hasSpoken`, hasUserSpoken), [uiKey, hasUserSpoken]);
   useEffect(() => saveSession(`${uiKey}_readyBaseline`, readyForBaseline), [uiKey, readyForBaseline]);
@@ -777,7 +800,6 @@ export default function Chat() {
   useEffect(() => saveSession(`${uiKey}_awaitDailyConfidence`, awaitingDailyConfidence), [uiKey, awaitingDailyConfidence]);
   useEffect(() => saveSession(`${uiKey}_backendUI`, backendUI), [uiKey, backendUI]);
 
-  // If we have an unanswered backend daily prompt at the end, force UI into awaitingDailyProgress
   useEffect(() => {
     const last = messages?.length ? messages[messages.length - 1] : null;
     const shouldAwait = !!last && last.role === "assistant" && last.type === "daily_progress";
@@ -785,7 +807,6 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
-  // Reset local UX gating when need changes
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
@@ -811,7 +832,6 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus]);
 
-  // Baseline triggers (kept)
   useEffect(() => {
     if (!chatHydrated) return;
     if (!hasUserSpoken || !readyForBaseline) return;
@@ -832,6 +852,7 @@ export default function Chat() {
         kind: "baseline_prompt",
         mode: "coach",
         message: `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
+        ts: new Date().toISOString(),
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -909,9 +930,8 @@ export default function Chat() {
       const data = res.data || {};
       const { lastAssistantText } = applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, currentNeedLabel());
 
-      // ✅ Speak the coach response (TTS)
-      // (Only speak real coach replies; system prompts are not spoken because backend doesn’t send them as assistant text here)
-      if (lastAssistantText) speakCoach(lastAssistantText);
+      // ✅ Speak with the correct coach voice
+      if (lastAssistantText) speakCoach(lastAssistantText, { coachId });
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
@@ -994,6 +1014,7 @@ export default function Chat() {
           kind: "daily_conf_prompt",
           mode: "coach",
           message: `Nice — that matters ✅\nOn the same 1–10 scale, what’s your confidence for **${nLabel}** right now?`,
+          ts: new Date().toISOString(),
         });
         return;
       }
@@ -1010,6 +1031,9 @@ export default function Chat() {
   const sendMessage = async () => {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
+
+    // ✅ unlock TTS on user gesture
+    unlockSpeech();
 
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
@@ -1095,6 +1119,7 @@ export default function Chat() {
           kind: "baseline_reason_prompt",
           mode: "coach",
           message: `Got it — baseline saved as ${level}/10 for **${nLabel}**. ✅\nWhat’s the main reason it feels like a ${level} (and not higher)?`,
+          ts: new Date().toISOString(),
         });
         return;
       }
@@ -1140,6 +1165,9 @@ export default function Chat() {
     if (awaitingDailyProgress) return;
     if (awaitingBaseline || awaitingDailyConfidence) return;
 
+    // ✅ unlock TTS on user gesture
+    unlockSpeech();
+
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
@@ -1148,7 +1176,6 @@ export default function Chat() {
       return;
     }
 
-    // ✅ FIX: don’t append repeated “quick note”. Upsert a system reminder ONCE.
     upsertVoiceBaselineReminder();
 
     try {
@@ -1260,17 +1287,10 @@ export default function Chat() {
       updateMessageById(setMessages, tempUserMsgId, { text: transcript });
 
       const chat = res.data?.chat || {};
-      const { lastAssistantText } = applyBackendChatResponse(
-        setMessages,
-        setBackendUI,
-        chat,
-        focus,
-        needKey,
-        currentNeedLabel()
-      );
+      const { lastAssistantText } = applyBackendChatResponse(setMessages, setBackendUI, chat, focus, needKey, currentNeedLabel());
 
-      // ✅ FIX: will now speak because role "coach" is normalized -> assistant
-      if (lastAssistantText) speakCoach(lastAssistantText);
+      // ✅ Speak with the correct coach voice
+      if (lastAssistantText) speakCoach(lastAssistantText, { coachId });
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
@@ -1467,7 +1487,6 @@ export default function Chat() {
         </div>
       </div>
 
-      {/* Need selector */}
       <div style={{ marginTop: 12, ...styles.card }}>
         <div style={styles.needRow}>
           <div style={{ fontWeight: 800 }}>What confidence area are we working on?</div>
@@ -1502,7 +1521,6 @@ export default function Chat() {
       </div>
 
       <div className="chat-layout" style={styles.layout}>
-        {/* LEFT: Chat */}
         <div>
           <div ref={listRef} style={styles.panel}>
             {messages.length === 0 && <div style={styles.muted}>Say what’s on your mind — I’ll respond like a real conversation.</div>}
@@ -1658,7 +1676,11 @@ export default function Chat() {
               {loading ? "Sending…" : "Send"}
             </button>
 
-            <button onClick={recording ? stopVoice : startVoice} disabled={loading || awaitingDailyProgress} style={recording ? styles.sendBtn : styles.btn}>
+            <button
+              onClick={recording ? stopVoice : startVoice}
+              disabled={loading || awaitingDailyProgress}
+              style={recording ? styles.sendBtn : styles.btn}
+            >
               {recording ? "Stop 🎙️" : "Voice 🎙️"}
             </button>
           </div>
@@ -1668,7 +1690,6 @@ export default function Chat() {
           </div>
         </div>
 
-        {/* RIGHT: Plans from this conversation */}
         <div className="conv-sidebar" style={styles.sidePanel}>
           <ConversationPlansSidebar plans={convPlans} />
         </div>
