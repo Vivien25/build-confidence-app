@@ -161,14 +161,14 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "20% center",
+    objectPosition: "5% center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",
   },
 
   faceSafeRight: {
     position: "absolute",
-    inset: "-6% -10%",
+    inset: "-8% -12%",
     width: "116%",
     height: "112%",
     objectFit: "contain",
