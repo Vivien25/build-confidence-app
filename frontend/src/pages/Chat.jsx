@@ -16,7 +16,6 @@ mermaid.initialize({
   suppressErrorRendering: true,
 });
 
-
 // ---------- localStorage helpers (persistent) ----------
 function loadSaved(key, fallback = null) {
   try {
@@ -328,7 +327,14 @@ function ConversationPlansSidebar({ plans = [] }) {
 
       <div style={{ display: "grid", gap: 10 }}>
         {plans.map((p) => (
-          <div key={p.id} style={{ border: "1px solid var(--border-soft, #e5e7eb)", borderRadius: 12, padding: 10 }}>
+          <div
+            key={p.id}
+            style={{
+              border: "1px solid var(--border-soft, #e5e7eb)",
+              borderRadius: 12,
+              padding: 10,
+            }}
+          >
             <div style={{ fontWeight: 900, lineHeight: 1.25 }}>
               {p.title || "Plan"}
               {p.focus ? <span style={styles.pill}>{p.focus}</span> : null}
@@ -370,7 +376,7 @@ function ConversationPlansSidebar({ plans = [] }) {
 }
 
 // -----------------------
-// Speak coach (TTS) — FIX Kai male voice
+// Speak coach (TTS) — FIX Kai male voice + STOP on page leave
 // -----------------------
 let _voicesCache = [];
 let _ttsUnlocked = false;
@@ -383,6 +389,12 @@ export function unlockSpeech() {
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(u);
     _ttsUnlocked = true;
+  } catch {}
+}
+
+function stopTTS() {
+  try {
+    if (window?.speechSynthesis) window.speechSynthesis.cancel();
   } catch {}
 }
 
@@ -616,8 +628,27 @@ export default function Chat() {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getProfile() || {});
 
+  // ✅ Keep profile in sync (fixes “Mira says I’m Kai” after switching coach elsewhere)
   useEffect(() => {
-    setProfile(getProfile() || {});
+    const refresh = () => setProfile(getProfile() || {});
+    refresh();
+
+    const onFocus = () => refresh();
+    const onVisibility = () => {
+      if (!document.hidden) refresh();
+      else stopTTS(); // stop speaking when tab hides
+    };
+    const onStorage = () => refresh();
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
   // --- TTS voice init ---
@@ -632,14 +663,25 @@ export default function Chat() {
     } catch {}
   }, []);
 
+  // ✅ stop speaking when leaving Chat route
+  useEffect(() => {
+    const onPageHide = () => stopTTS();
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      stopTTS();
+    };
+  }, []);
+
   const userAvatarKey = profile?.avatar ?? "neutral";
   const userAvatar = avatarMap[userAvatarKey];
 
   const coachId = profile?.coachId || "mira";
-  const coach = (COACHES && (COACHES[coachId] || COACHES.mira)) || {
-    name: "Coach",
-    avatar: userAvatar?.img,
-  };
+  const coach =
+    (COACHES && (COACHES[coachId] || COACHES.mira)) || {
+      name: "Coach",
+      avatar: userAvatar?.img,
+    };
 
   const userId = profile?.user_id || "local-dev";
   const focus = profile?.focus || "work";
@@ -683,11 +725,12 @@ export default function Chat() {
 
   const needSlug = needKey === "custom" ? `custom_${slugify(customNeedLabel) || "custom"}` : needKey;
 
-  const chatKey = `bc_chat_${userId}_${focus}_${needSlug}`;
+  // ✅ include coachId so Mira/Kai have separate chats + baselines
+  const chatKey = `bc_chat_${userId}_${focus}_${needSlug}_${coachId}`;
   const plansKey = `bc_plans_${userId}`;
-  const convPlansKey = `bc_conv_plans_${userId}_${focus}`;
-  const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}`;
-  const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}`;
+  const convPlansKey = `bc_conv_plans_${userId}_${focus}_${coachId}`;
+  const confidenceKey = `bc_conf_${userId}_${focus}_${needSlug}_${coachId}`;
+  const uiKey = `bc_chat_ui_${userId}_${focus}_${needSlug}_${coachId}`;
 
   const [hasUserSpoken, setHasUserSpoken] = useState(() => loadSession(`${uiKey}_hasSpoken`, false));
   const [readyForBaseline, setReadyForBaseline] = useState(() => loadSession(`${uiKey}_readyBaseline`, false));
@@ -725,6 +768,15 @@ export default function Chat() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
 
+  // ✅ invalidate old requests when switching coach + stop TTS
+  useEffect(() => {
+    reqSeqRef.current += 1;
+    sendingRef.current = false;
+    setLoading(false);
+    stopTTS();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [coachId]);
+
   function anyPromptActive() {
     return awaitingBaseline || awaitingBaselineReason || awaitingDailyProgress || awaitingDailyConfidence;
   }
@@ -742,7 +794,7 @@ export default function Chat() {
     saveSession(`${uiKey}_awaitBaseline`, true);
 
     upsertSystemMessage(setMessages, {
-      id: `system_baseline_${focus}_${needSlug}`,
+      id: `system_baseline_${focus}_${needSlug}_${coachId}`,
       role: "assistant",
       type: "system",
       kind: "baseline_prompt",
@@ -762,19 +814,15 @@ export default function Chat() {
     const askedForPlan = userAskedForPlan(userText);
     const isNum = parseConfidence(userText) != null;
 
-    // If we’re waiting for baseline/baseline-reason but the user isn’t asking for a plan,
-    // let them chat normally and clear the sticky baseline UI state.
     if (!askedForPlan && !isNum && (awaitingBaseline || awaitingBaselineReason)) {
       setAwaitingBaseline(false);
       setAwaitingBaselineReason(false);
       saveSession(`${uiKey}_awaitBaseline`, false);
       saveSession(`${uiKey}_awaitBaselineReason`, false);
 
-      // Also reset “readyForBaseline” so it doesn’t re-trigger baseline prompt later.
       setReadyForBaseline(false);
       saveSession(`${uiKey}_readyBaseline`, false);
 
-      // Remove baseline system prompts
       setMessages((prev) =>
         (prev || []).filter(
           (m) =>
@@ -792,7 +840,7 @@ export default function Chat() {
     if (baseline != null) return;
     if (awaitingBaseline || awaitingBaselineReason) return;
     upsertSystemMessage(setMessages, {
-      id: `system_voice_note_${focus}_${needSlug}`,
+      id: `system_voice_note_${focus}_${needSlug}_${coachId}`,
       role: "assistant",
       type: "system",
       kind: "voice_baseline_note",
@@ -827,7 +875,6 @@ export default function Chat() {
         setMessages((prev) => {
           const prevArr = Array.isArray(prev) ? prev : [];
           const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
-          // Keep your previous behavior, but don’t permanently block normal history updates.
           const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
           if (toAdd.length === 0) return prevArr;
           return [...prevArr, ...toAdd];
@@ -890,6 +937,7 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
+  // Reset prompt state when context changes (need/focus/coach)
   useEffect(() => {
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
@@ -913,7 +961,7 @@ export default function Chat() {
 
     setBackendUI({ mode: "CHAT", show_plan_sidebar: false, plan_link: null, mermaid: null });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needKey, customNeedLabel, focus]);
+  }, [needKey, customNeedLabel, focus, coachId]);
 
   useEffect(() => {
     if (!chatHydrated) return;
@@ -926,11 +974,10 @@ export default function Chat() {
 
     if (needKey === "custom" && !customNeedLabel.trim()) return;
 
-    // ✅ Only prompt baseline if user still has no baseline AND (readyForBaseline is true)
     if (!conf || typeof conf?.baseline !== "number") {
       setAwaitingBaseline(true);
       upsertSystemMessage(setMessages, {
-        id: `system_baseline_${focus}_${needSlug}`,
+        id: `system_baseline_${focus}_${needSlug}_${coachId}`,
         role: "assistant",
         type: "system",
         kind: "baseline_prompt",
@@ -940,7 +987,7 @@ export default function Chat() {
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel]);
+  }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel, coachId]);
 
   const acceptPlan = (planObj) => {
     const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
@@ -1021,7 +1068,6 @@ export default function Chat() {
         currentNeedLabel()
       );
 
-      // ✅ If backend didn’t ask baseline, don’t keep frontend stuck in baseline input.
       if (!sawBaselinePrompt && awaitingBaseline) {
         setAwaitingBaseline(false);
         saveSession(`${uiKey}_awaitBaseline`, false);
@@ -1104,7 +1150,7 @@ export default function Chat() {
         await callCoachBackend(`Check-in update: I made progress on my "${nLabel}" (${fLabel}) plan since the last check-in.`);
         setAwaitingDailyConfidence(true);
         upsertSystemMessage(setMessages, {
-          id: `system_daily_conf_${focus}_${needSlug}`,
+          id: `system_daily_conf_${focus}_${needSlug}_${coachId}`,
           role: "assistant",
           type: "system",
           kind: "daily_conf_prompt",
@@ -1150,7 +1196,6 @@ export default function Chat() {
     const userText = input.trim();
     setInput("");
 
-    // ✅ NEW: if baseline UI is active but user is just chatting, cancel baseline flow
     cancelBaselineFlowIfChatting(userText);
 
     if (!isGreeting(userText)) setHasUserSpoken(true);
@@ -1158,8 +1203,6 @@ export default function Chat() {
     const askedForPlan = userAskedForPlan(userText);
     const isJustConfidenceNumber = parseConfidence(userText) != null;
 
-    // ✅ NEW: readyForBaseline should NOT be sticky forever.
-    // Turn it on only when user asks for plan. Turn it off when user stops asking for plan.
     if (!readyForBaseline && askedForPlan && !isJustConfidenceNumber) {
       setReadyForBaseline(true);
       saveSession(`${uiKey}_readyBaseline`, true);
@@ -1197,7 +1240,6 @@ export default function Chat() {
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
-          // If user typed non-number while awaiting baseline, allow normal chat if not asking for a plan.
           if (!askedForPlan) {
             setAwaitingBaseline(false);
             saveSession(`${uiKey}_awaitBaseline`, false);
@@ -1228,7 +1270,7 @@ export default function Chat() {
         setMessages((prev) => prev.filter((m) => !(m.type === "system" && m.kind === "baseline_prompt")));
 
         upsertSystemMessage(setMessages, {
-          id: `system_baseline_reason_${focus}_${needSlug}`,
+          id: `system_baseline_reason_${focus}_${needSlug}_${coachId}`,
           role: "assistant",
           type: "system",
           kind: "baseline_reason_prompt",
@@ -1285,7 +1327,13 @@ export default function Chat() {
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)' },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)',
+        },
       ]);
       return;
     }
@@ -1345,7 +1393,13 @@ export default function Chat() {
     } catch {
       setMessages((prev) => [
         ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "I can’t access your microphone. Please allow mic permission in the browser settings, then try again." },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: "I can’t access your microphone. Please allow mic permission in the browser settings, then try again.",
+        },
       ]);
     }
   }
@@ -1390,7 +1444,7 @@ export default function Chat() {
       const ext = String(blob.type || "").includes("ogg") ? "ogg" : "webm";
       form.append("audio", blob, `voice.${ext}`);
 
-      // ✅ FIX: DO NOT manually set Content-Type for multipart/form-data (boundary must be auto)
+      // ✅ DO NOT manually set Content-Type (boundary must be auto)
       const res = await axios.post(`${API_BASE}/chat/voice`, form, {
         timeout: Math.max(AXIOS_TIMEOUT_MS, 60000),
       });
@@ -1459,7 +1513,10 @@ export default function Chat() {
         (m) =>
           !(
             m.type === "system" &&
-            (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt" || m.kind === "daily_conf_prompt" || m.kind === "voice_baseline_note")
+            (m.kind === "baseline_prompt" ||
+              m.kind === "baseline_reason_prompt" ||
+              m.kind === "daily_conf_prompt" ||
+              m.kind === "voice_baseline_note")
           )
       )
     );
@@ -1513,8 +1570,22 @@ export default function Chat() {
       color: "var(--text-primary, #111827)",
     },
     muted: { opacity: 0.8, color: "var(--text-muted, #6b7280)" },
-    bubbleUser: { background: "var(--bg-chat-user, #111827)", color: "#fff", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
-    bubbleCoach: { background: "var(--bg-chat-coach, #f3f4f6)", color: "#111827", borderRadius: 12, padding: 12, whiteSpace: "pre-wrap", lineHeight: 1.45 },
+    bubbleUser: {
+      background: "var(--bg-chat-user, #111827)",
+      color: "#fff",
+      borderRadius: 12,
+      padding: 12,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.45,
+    },
+    bubbleCoach: {
+      background: "var(--bg-chat-coach, #f3f4f6)",
+      color: "#111827",
+      borderRadius: 12,
+      padding: 12,
+      whiteSpace: "pre-wrap",
+      lineHeight: 1.45,
+    },
     btn: {
       height: 36,
       borderRadius: 10,
@@ -1559,8 +1630,23 @@ export default function Chat() {
     linkList: { margin: "6px 0 0", paddingLeft: 18 },
     progressBtns: { display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" },
     needRow: { display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
-    select: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827" },
-    smallInput: { height: 36, borderRadius: 10, border: "1px solid var(--border-soft, #e5e7eb)", padding: "0 10px", background: "#fff", color: "#111827", minWidth: 220 },
+    select: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "#fff",
+      color: "#111827",
+    },
+    smallInput: {
+      height: 36,
+      borderRadius: 10,
+      border: "1px solid var(--border-soft, #e5e7eb)",
+      padding: "0 10px",
+      background: "#fff",
+      color: "#111827",
+      minWidth: 220,
+    },
   };
 
   const showConfidenceHint = awaitingBaseline || awaitingDailyConfidence;
@@ -1583,10 +1669,22 @@ export default function Chat() {
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => navigate("/plans")} style={styles.btn}>
+          <button
+            onClick={() => {
+              stopTTS();
+              navigate("/plans");
+            }}
+            style={styles.btn}
+          >
             Your All Plans
           </button>
-          <button onClick={() => navigate("/focus")} style={styles.btn}>
+          <button
+            onClick={() => {
+              stopTTS();
+              navigate("/focus");
+            }}
+            style={styles.btn}
+          >
             Change focus
           </button>
 
