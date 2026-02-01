@@ -151,7 +151,7 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "35% center", // Mira a bit left
+    objectPosition: "10% center", // Mira a bit left
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
   faceSafeRight: {
@@ -160,7 +160,7 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "65% center", // Kai a bit right
+    objectPosition: "90% center", // Kai a bit right
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
 
