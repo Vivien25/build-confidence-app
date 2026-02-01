@@ -9,8 +9,8 @@ import userMasc from "../assets/avatars/user_masc.png";
 import userNeutral from "../assets/avatars/user_neutral.png";
 
 // ✅ coach avatar images
-import coachMira from "../assets/avatars/mira.png";
-import coachKai from "../assets/avatars/kai.png";
+import coachMira from "../assets/avatars/coach_mira.png";
+import coachKai from "../assets/avatars/coach_kai.png";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
