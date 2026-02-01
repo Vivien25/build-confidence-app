@@ -156,7 +156,7 @@ const styles = {
   },
   faceSafeRight: {
     position: "absolute",
-    inset: "-4% -6%",
+    inset: "-8% -10%",
     width: "116%",
     height: "112%",
     objectFit: "contain",
