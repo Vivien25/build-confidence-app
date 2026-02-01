@@ -129,14 +129,14 @@ const styles = {
   leftWrap: {
     position: "absolute",
     inset: 0,
-    clipPath: "polygon(0 0, 60% 0, 42% 100%, 0 100%)",
+    clipPath: "polygon(0 0, 50% 0, 32% 100%, 0 100%)",
     cursor: "pointer",
     outline: "none",
   },
   rightWrap: {
     position: "absolute",
     inset: 0,
-    clipPath: "polygon(60% 0, 100% 0, 100% 100%, 42% 100%)",
+    clipPath: "polygon(50% 0, 100% 0, 100% 100%, 32% 100%)",
     cursor: "pointer",
     outline: "none",
   },
@@ -176,8 +176,8 @@ const styles = {
     /* 🔪 crop to left 66% */
     clipPath: "inset(0 34% 0 0)",
   
-    /* optional fine-tune */
-    transform: "scale(1.12) translateX(6%)",
+    transform: "scale(1.18) translateX(15%)", // ✅ more right
+    transformOrigin: "center",
   
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",

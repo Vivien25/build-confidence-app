@@ -9,7 +9,13 @@ import { useNavigate } from "react-router-dom";
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 const AXIOS_TIMEOUT_MS = Number(import.meta.env.VITE_CHAT_TIMEOUT_MS || 20000);
 
-mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
+mermaid.initialize({
+  startOnLoad: false,
+  securityLevel: "strict",
+  // prevents Mermaid from trying to render "error diagrams" in some cases
+  suppressErrorRendering: true,
+});
+
 
 // ---------- localStorage helpers (persistent) ----------
 function loadSaved(key, fallback = null) {
@@ -90,22 +96,54 @@ function MermaidDiagram({ code }) {
   useEffect(() => {
     let cancelled = false;
 
+    const normalizeMermaid = (raw) => {
+      let s = String(raw || "").trim();
+      if (!s) return "";
+
+      // Strip fenced blocks that LLMs often return:
+      // ```mermaid
+      // ...
+      // ```
+      s = s.replace(/^```mermaid\s*/i, "").replace(/```$/i, "").trim();
+      s = s.replace(/^```\s*/i, "").replace(/```$/i, "").trim();
+
+      // Mermaid really hates CRLF sometimes
+      s = s.replace(/\r\n/g, "\n");
+
+      return s;
+    };
+
     const run = async () => {
+      if (!ref.current) return;
+
+      const src = normalizeMermaid(code);
+
+      if (!src) {
+        ref.current.innerHTML = "<div style='opacity:.75;font-size:13px'>No diagram.</div>";
+        return;
+      }
+
+      // ✅ Validate first; if invalid, don't call render (prevents giant red error output)
       try {
-        if (!ref.current) return;
+        await mermaid.parse(src);
+      } catch {
+        ref.current.innerHTML =
+          "<div style='opacity:.75;font-size:13px'>Diagram unavailable (invalid Mermaid).</div>";
+        return;
+      }
 
-        const src = String(code || "").trim();
-        if (!src) {
-          ref.current.innerHTML = "<div style='opacity:.8'>No diagram.</div>";
-          return;
-        }
-
+      try {
         const id = `mmd-${Math.random().toString(16).slice(2)}`;
         const { svg } = await mermaid.render(id, src);
-        if (!cancelled && ref.current) ref.current.innerHTML = svg;
+
+        if (!cancelled && ref.current) {
+          // Keep diagrams from taking over the page
+          ref.current.innerHTML = `<div style="max-width:100%; overflow:auto;">${svg}</div>`;
+        }
       } catch {
         if (!cancelled && ref.current) {
-          ref.current.innerHTML = "<div style='opacity:.8'>Diagram failed to render.</div>";
+          ref.current.innerHTML =
+            "<div style='opacity:.75;font-size:13px'>Diagram failed to render.</div>";
         }
       }
     };
@@ -116,7 +154,7 @@ function MermaidDiagram({ code }) {
     };
   }, [code]);
 
-  return <div ref={ref} />;
+  return <div ref={ref} style={{ maxWidth: "100%", overflowX: "auto" }} />;
 }
 
 // ✅ Replace/update system messages instead of appending stale ones
