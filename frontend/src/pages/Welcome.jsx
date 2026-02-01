@@ -168,14 +168,21 @@ const styles = {
 
   faceSafeRight: {
     position: "absolute",
-    inset: "-10% -12%",
-    width: "116%",
-    height: "112%",
-    objectFit: "contain",
-    objectPosition: "120% center",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+  
+    /* 🔪 crop to left 66% */
+    clipPath: "inset(0 34% 0 0)",
+  
+    /* optional fine-tune */
+    transform: "scale(1.12) translateX(6%)",
+  
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",
   },
+  
 
   overlay: {
     position: "absolute",
