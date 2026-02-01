@@ -174,7 +174,7 @@ const styles = {
     objectFit: "cover",
   
     /* 🔪 crop to left 66% */
-    clipPath: "inset(0 25% 0 0)",
+    clipPath: "inset(0 15% 0 0)",
   
     transform: "scale(1.05) translateX(34%)", // ✅ more right
     transformOrigin: "center",
