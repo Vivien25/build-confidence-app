@@ -1,87 +1,146 @@
-:root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+/* =========================
+   Warm Relax Theme (Global)
+   ========================= */
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
+   :root {
+    /* Typography */
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  
+    /* Theme tokens */
+    --bg: #fff7f0;                /* warm paper */
+    --bg2: #ffe9d7;               /* peach tint */
+    --surface: rgba(255, 255, 255, 0.78);
+    --surface2: rgba(255, 255, 255, 0.58);
+  
+    --text: #2b2a27;              /* warm charcoal */
+    --muted: rgba(43, 42, 39, 0.62);
+  
+    --primary: #e38b6d;           /* warm coral */
+    --primary2: #d46b53;          /* deeper coral */
+    --accent: #7fbfa3;            /* calm sage */
+    --ring: rgba(227, 139, 109, 0.35);
+  
+    --border: rgba(43, 42, 39, 0.12);
+    --shadow: 0 18px 60px rgba(43, 42, 39, 0.10);
+    --shadow2: 0 10px 30px rgba(43, 42, 39, 0.10);
+  
+    --r-lg: 20px;
+    --r-md: 14px;
+    --r-sm: 12px;
+  
+    color: var(--text);
+    background-color: var(--bg);
   }
-  a:hover {
-    color: #747bff;
+  
+  /* Reset */
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; }
+  
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+  
+    /* IMPORTANT: remove the starter “center everything” behavior */
+    display: block;
+  
+    /* Warm background */
+    background:
+      radial-gradient(1200px 800px at 20% 10%, var(--bg2), transparent 60%),
+      radial-gradient(900px 700px at 80% 20%, rgba(127, 191, 163, 0.22), transparent 55%),
+      linear-gradient(180deg, var(--bg), #ffffff 120%);
+    color: var(--text);
   }
-  button {
-    background-color: #f9f9f9;
+  
+  /* Links */
+  a {
+    color: var(--primary2);
+    text-decoration: none;
+    font-weight: 600;
   }
-}
-
-@media (max-width: 1100px) {
-  .chat-layout {
-    grid-template-columns: minmax(0, 1fr) 360px !important;
+  a:hover { text-decoration: underline; }
+  
+  /* Headings */
+  h1, h2, h3 {
+    margin: 0;
+    letter-spacing: -0.3px;
   }
-  .chat-layout .conv-sidebar {
-    display: none !important; /* hide “Plans from this conversation” on medium screens */
+  
+  /* =========================
+     Reusable UI classes
+     ========================= */
+  
+  .muted { color: var(--muted); }
+  
+  .warm-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow2);
+    backdrop-filter: blur(10px);
   }
-}
-
-@media (max-width: 820px) {
-  .chat-layout {
-    grid-template-columns: 1fr !important;
+  
+  .warm-input {
+    width: 100%;
+    padding: 14px 14px;
+    border-radius: var(--r-md);
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--text);
+    outline: none;
   }
-  .chat-layout .conv-sidebar,
-  .chat-layout .global-sidebar {
-    display: none !important; /* sidebars hidden on mobile; use /plans page */
+  .warm-input:focus {
+    border-color: rgba(227, 139, 109, 0.6);
+    box-shadow: 0 0 0 4px var(--ring);
   }
-}
+  
+  .warm-btn {
+    padding: 12px 16px;
+    border: 0;
+    border-radius: 999px;
+    color: #fff;
+    font-weight: 800;
+    cursor: pointer;
+    background: linear-gradient(135deg, var(--primary), var(--primary2));
+    box-shadow: var(--shadow2);
+    transition: transform 120ms ease, filter 120ms ease;
+  }
+  .warm-btn:hover { transform: translateY(-1px); filter: brightness(1.02); }
+  .warm-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+  
+  /* If you still have other buttons, don’t force dark background globally */
+  button { font-family: inherit; }
+  
+  /* =========================
+     Responsive chat rules (keep yours)
+     ========================= */
+  
+  @media (max-width: 1100px) {
+    .chat-layout {
+      grid-template-columns: minmax(0, 1fr) 360px !important;
+    }
+    .chat-layout .conv-sidebar {
+      display: none !important;
+    }
+  }
+  
+  @media (max-width: 820px) {
+    .chat-layout {
+      grid-template-columns: 1fr !important;
+    }
+    .chat-layout .conv-sidebar,
+    .chat-layout .global-sidebar {
+      display: none !important;
+    }
+  }
+  
+  @media (max-width: 760px) {
+    .warm-card {
+      padding: 16px !important;
+    }
+  }

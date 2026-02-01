@@ -335,18 +335,52 @@ function ConversationPlansSidebar({ plans = [] }) {
 function speakCoach(text) {
   try {
     if (!window?.speechSynthesis) return;
-    window.speechSynthesis.cancel();
 
-    const u = new SpeechSynthesisUtterance(String(text || ""));
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    window.speechSynthesis.speak(u);
+    const s = String(text || "").trim();
+    if (!s) return;
+
+    // Some browsers need voices warmed up before they can speak reliably.
+    // We attempt to fetch voices; if none, we retry a few times.
+    const trySpeak = (attempt = 0) => {
+      try {
+        const voices = window.speechSynthesis.getVoices?.() || [];
+
+        // If voices aren't loaded yet, retry shortly.
+        if (!voices.length && attempt < 4) {
+          setTimeout(() => trySpeak(attempt + 1), 250);
+          return;
+        }
+
+        window.speechSynthesis.cancel();
+
+        const u = new SpeechSynthesisUtterance(s);
+        u.rate = 1.0;
+        u.pitch = 1.0;
+        u.lang = "en-US";
+
+        const preferred =
+          voices.find((v) => /en/i.test(v.lang) && /female|woman|zira|susan|samantha|victoria/i.test(v.name)) ||
+          voices.find((v) => /en/i.test(v.lang)) ||
+          voices[0];
+
+        if (preferred) u.voice = preferred;
+
+        // async speak avoids “silent speak” in some browsers
+        setTimeout(() => {
+          try {
+            window.speechSynthesis.speak(u);
+          } catch {}
+        }, 0);
+      } catch {}
+    };
+
+    trySpeak(0);
   } catch {}
 }
 
 // ✅ Apply backend /chat response into UI messages + plans
 // Fix A: attach backend_key so /history merge won't duplicate assistant messages
-function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, needLabel, messagesSnapshot) {
+function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, needLabel) {
   const ui = data.ui || {};
   const uiState = {
     mode: ui.mode || "CHAT",
@@ -468,6 +502,28 @@ export default function Chat() {
 
   useEffect(() => {
     setProfile(getProfile() || {});
+  }, []);
+
+  // --- TTS voice init (fix silent speech) ---
+  const ttsReadyRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      if (!window?.speechSynthesis) return;
+
+      const warm = () => {
+        // trigger load
+        window.speechSynthesis.getVoices();
+        ttsReadyRef.current = true;
+      };
+
+      warm();
+      window.speechSynthesis.onvoiceschanged = warm;
+
+      return () => {
+        window.speechSynthesis.onvoiceschanged = null;
+      };
+    } catch {}
   }, []);
 
   const userAvatarKey = profile?.avatar ?? "neutral";
@@ -783,14 +839,29 @@ export default function Chat() {
 
     setMessages((prev) => [
       ...prev,
-      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Saved ✅ Added to this conversation and your All Plans page.", ts: new Date().toISOString() },
+      {
+        id: uid("msg"),
+        role: "assistant",
+        type: "text",
+        mode: "coach",
+        message: "Saved ✅ Added to this conversation and your All Plans page.",
+        ts: new Date().toISOString(),
+      },
     ]);
   };
 
   const revisePlan = async () => {
     setMessages((prev) => [
       ...prev,
-      { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Sure — tell me what to change. (Examples: “make it shorter”, “focus on system design”, “replace step 3”, “more lightweight”.)", ts: new Date().toISOString() },
+      {
+        id: uid("msg"),
+        role: "assistant",
+        type: "text",
+        mode: "coach",
+        message:
+          "Sure — tell me what to change. (Examples: “make it shorter”, “focus on system design”, “replace step 3”, “more lightweight”.)",
+        ts: new Date().toISOString(),
+      },
     ]);
   };
 
@@ -814,7 +885,13 @@ export default function Chat() {
       if (mySeq !== reqSeqRef.current) return;
 
       const data = res.data || {};
-      applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, currentNeedLabel(), messages);
+      const { lastAssistantText } = applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, currentNeedLabel());
+
+      // ✅ Speak the coach response (TTS)
+      if (lastAssistantText) {
+        // If voices are not ready yet, speakCoach will retry internally.
+        speakCoach(lastAssistantText);
+      }
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
@@ -831,7 +908,10 @@ export default function Chat() {
 
       setMessages((prev) => {
         if (alreadyHasRecentReachError(prev) && finalText.includes("couldn’t reach the coach")) return prev;
-        return [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: finalText, ts: new Date().toISOString() }];
+        return [
+          ...prev,
+          { id: uid("msg"), role: "assistant", type: "text", mode: "chat", message: finalText, ts: new Date().toISOString() },
+        ];
       });
     }
   }
@@ -898,7 +978,9 @@ export default function Chat() {
         return;
       }
 
-      await callCoachBackend(`I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`);
+      await callCoachBackend(
+        `I didn’t get a chance to work on my ${fLabel} plan for "${nLabel}". Please give practical time-management tips and one tiny next step I can do in 5 minutes.`
+      );
     } finally {
       setLoading(false);
       sendingRef.current = false;
@@ -1050,6 +1132,25 @@ export default function Chat() {
       return;
     }
 
+    // ✅ Gentle guard: if baseline is missing, remind user before voice (voice transcript may include “plan”).
+    // We still allow voice chat, but this reduces “plan without baseline” incidents via voice.
+    const baseline = getLocalBaseline();
+    if (baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
+      // Not blocking—just a helpful reminder.
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message:
+            "Quick note: if you’re going to ask for a plan, I’ll need your 1–10 confidence baseline first. You can also type a number anytime (like “6”).",
+          ts: new Date().toISOString(),
+        },
+      ]);
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current = stream;
@@ -1169,10 +1270,10 @@ export default function Chat() {
         chat,
         focus,
         needKey,
-        currentNeedLabel(),
-        messages
+        currentNeedLabel()
       );
 
+      // ✅ Speak coach response for voice path too
       if (lastAssistantText) speakCoach(lastAssistantText);
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
@@ -1226,15 +1327,11 @@ export default function Chat() {
     // remove any baseline system prompts currently shown
     setMessages((prev) =>
       (prev || []).filter(
-        (m) =>
-          !(
-            m.type === "system" &&
-            (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt")
-          )
+        (m) => !(m.type === "system" && (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt"))
       )
     );
 
-    // optional: confirm in chat (assistant message)
+    // confirm in chat (assistant message)
     setMessages((prev) => [
       ...prev,
       {
@@ -1430,8 +1527,12 @@ export default function Chat() {
                       <div style={styles.bubbleCoach}>
                         <div>{m.message}</div>
                         <div style={styles.progressBtns}>
-                          <button style={styles.primaryBtn} onClick={() => handleDailyProgress(true)}>Yes, I did</button>
-                          <button style={styles.btn} onClick={() => handleDailyProgress(false)}>Not yet</button>
+                          <button style={styles.primaryBtn} onClick={() => handleDailyProgress(true)}>
+                            Yes, I did
+                          </button>
+                          <button style={styles.btn} onClick={() => handleDailyProgress(false)}>
+                            Not yet
+                          </button>
                         </div>
                       </div>
                     ) : m.type === "plan" ? (
@@ -1492,7 +1593,9 @@ export default function Chat() {
                           >
                             Accept
                           </button>
-                          <button style={styles.btn} onClick={revisePlan}>Revise</button>
+                          <button style={styles.btn} onClick={revisePlan}>
+                            Revise
+                          </button>
                         </div>
                       </div>
                     ) : (
@@ -1543,7 +1646,9 @@ export default function Chat() {
           {(showConfidenceHint || awaitingBaselineReason) && (
             <div style={styles.hint}>
               {showConfidenceHint ? (
-                <>Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).</>
+                <>
+                  Tip: type a number from <b>1</b> to <b>10</b> (example: <b>6</b>).
+                </>
               ) : (
                 <>Tip: one sentence is enough 🙂</>
               )}
@@ -1551,19 +1656,11 @@ export default function Chat() {
           )}
 
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button
-              onClick={sendMessage}
-              disabled={loading || awaitingDailyProgress}
-              style={styles.sendBtn}
-            >
+            <button onClick={sendMessage} disabled={loading || awaitingDailyProgress} style={styles.sendBtn}>
               {loading ? "Sending…" : "Send"}
             </button>
 
-            <button
-              onClick={recording ? stopVoice : startVoice}
-              disabled={loading || awaitingDailyProgress}
-              style={recording ? styles.sendBtn : styles.btn}
-            >
+            <button onClick={recording ? stopVoice : startVoice} disabled={loading || awaitingDailyProgress} style={recording ? styles.sendBtn : styles.btn}>
               {recording ? "Stop 🎙️" : "Voice 🎙️"}
             </button>
           </div>

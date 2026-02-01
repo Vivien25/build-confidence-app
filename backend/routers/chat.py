@@ -298,6 +298,11 @@ DEFAULT_STATE = {
         "discovery_answers": {},
         "active_plan_id": None,
         "locked": False,
+
+        # ✅ Baseline gate (minimal, does not change existing features)
+        "awaiting_baseline": False,            # ask user for 1–10 before any NEW plan
+        "awaiting_baseline_reason": False,     # (optional) one reason question
+        "pending_plan_after_baseline": False,  # if True, resume plan discovery after baseline capture
     },
     "plans": {},
     # ✅ 12-hour follow-up tracking (Option B)
@@ -354,13 +359,14 @@ _NEW_PLAN_PATTERNS = [
 _PLAN_REQUEST_PATTERNS = [
     r"\bplan\b",
     r"\broadmap\b",
+    r"\bnext steps\b",
+    r"\baction items\b",
+    r"\bsteps\b",
     r"\bschedule\b",
-    r"\bprep\b",
-    r"\bprepare\b",
-    r"\bhelp me\b",
-    r"\borganize\b",
+    r"\bchecklist\b",
     r"\bgame plan\b",
 ]
+
 _REFINE_PATTERNS = [
     r"\badjust\b",
     r"\brefine\b",
@@ -403,12 +409,6 @@ def explicit_new_plan_request(user_text: str) -> bool:
     return _matches_any(user_text, _NEW_PLAN_PATTERNS)
 
 
-def plan_requested(user_text: str) -> bool:
-    if is_greeting(user_text):
-        return False
-    return _matches_any(user_text, _PLAN_REQUEST_PATTERNS)
-
-
 def refine_requested(user_text: str) -> bool:
     return _matches_any(user_text, _REFINE_PATTERNS)
 
@@ -419,6 +419,35 @@ def skip_requested(user_text: str) -> bool:
 
 def show_plan_requested(user_text: str) -> bool:
     return _matches_any(user_text, _SHOW_PLAN_PATTERNS)
+
+
+def plan_requested(user_text: str) -> bool:
+    """
+    Only enter plan flow when the user is clearly asking for a plan.
+    Avoid triggering PLAN_BUILD for casual 'help me ...' chat.
+    """
+    if is_greeting(user_text):
+        return False
+
+    t = (user_text or "").strip().lower()
+    if not t:
+        return False
+
+    # If user explicitly says "no plan / just chat / not now", do not plan.
+    if skip_requested(user_text):
+        return False
+
+    # Hard plan intents only
+    if _matches_any(user_text, _PLAN_REQUEST_PATTERNS):
+        return True
+
+    # Soft phrases like "help me" should NOT trigger planning unless paired with a plan keyword
+    if "help me" in t:
+        if any(k in t for k in ["plan", "roadmap", "next steps", "action items", "steps", "schedule", "checklist"]):
+            return True
+        return False
+
+    return False
 
 
 def normalize_topic_key(topic: Optional[str]) -> Optional[str]:
@@ -676,7 +705,7 @@ def extract_bullets(text: str, max_items: int = 10) -> List[str]:
 
 
 # ===========================
-# Confidence capture
+# Confidence capture + baseline helpers
 # ===========================
 def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: str) -> bool:
     t = (user_text or "").strip().lower()
@@ -693,6 +722,30 @@ def maybe_capture_confidence(state: Dict[str, Any], user_text: str, topic_key: s
     conf["last"] = val
     conf["updated_at"] = _now_iso()
     return True
+
+
+def has_baseline(state: Dict[str, Any], topic_key: str) -> bool:
+    try:
+        conf = (state.get("metrics") or {}).get("confidence") or {}
+        t = conf.get(topic_key) or {}
+        return isinstance(t.get("baseline"), (int, float))
+    except Exception:
+        return False
+
+
+def _baseline_prompt_text(topic_key: str) -> str:
+    pretty = topic_key.replace("_", " ")
+    return (
+        f"Before I build a plan for **{pretty}**, quick baseline.\n"
+        "On a scale from **1–10**, what’s your confidence right now?"
+    )
+
+
+def _baseline_reason_prompt_text(topic_key: str, level: Optional[int] = None) -> str:
+    pretty = topic_key.replace("_", " ")
+    if level is None:
+        return f"Got it. What’s the main reason your confidence for **{pretty}** isn’t higher?"
+    return f"Got it — baseline saved as **{level}/10** for **{pretty}**. ✅\nWhat’s the main reason it feels like a {level} (and not higher)?"
 
 
 # ===========================
@@ -1057,13 +1110,147 @@ def process_chat_message(
                 plan=None,
             )
 
+    # Persist incoming user message
     state["history"].append({"role": "user", "text": user_text, "ts": _now_iso(), "kind": "user"})
     state["history"] = state["history"][-120:]
 
     _schedule_followup(state)
 
+    # Capture confidence (if message is just a number)
     saved_conf = maybe_capture_confidence(state, user_text, topic_key)
 
+    # ===========================
+    # ✅ BASELINE GATE (fix: no plan without baseline)
+    # - Only blocks NEW plan creation flows (DISCOVERY/DRAFT)
+    # - Does NOT affect: chat, show plan, refine existing plan
+    # ===========================
+    pb = state["plan_build"]
+    wants_new_plan = plan_requested(user_text) or explicit_new_plan_request(user_text)
+
+    # If we are mid-baseline collection, handle it here deterministically.
+    if pb.get("awaiting_baseline"):
+        # Expect a number. If not, re-prompt without changing other flows.
+        if not saved_conf:
+            state["mode"] = "CHAT"
+            resp = ChatResponse(
+                messages=[_coach_msg(_baseline_prompt_text(topic_key), kind="baseline_prompt")],
+                ui=UIState(mode="CHAT", show_plan_sidebar=False),
+                effects=Effects(saved_confidence=False),
+                plan=None,
+            )
+        else:
+            # Baseline saved. Move to optional reason prompt.
+            pb["awaiting_baseline"] = False
+            pb["awaiting_baseline_reason"] = True
+            pb["topic"] = topic_key  # keep topic pinned for pending plan
+            state["plan_build"] = pb
+
+            # Extract the baseline number for nicer messaging
+            level = None
+            try:
+                m = re.fullmatch(r"(\d{1,2})(?:\s*/\s*10)?", (user_text or "").strip().lower())
+                if m:
+                    level = int(m.group(1))
+            except Exception:
+                level = None
+
+            state["mode"] = "CHAT"
+            resp = ChatResponse(
+                messages=[_coach_msg(_baseline_reason_prompt_text(topic_key, level), kind="baseline_reason_prompt")],
+                ui=UIState(mode="CHAT", show_plan_sidebar=False),
+                effects=Effects(saved_confidence=True),
+                plan=None,
+            )
+
+        # persist coach reply
+        if resp.messages:
+            m0 = resp.messages[0]
+            state["history"].append({"role": "coach", "text": m0.text, "ts": m0.ts, "kind": (m0.kind or "coach")})
+            state["history"] = state["history"][-120:]
+        bucket.clear()
+        bucket.update(state)
+        _save_all_state(all_state)
+        return resp
+
+    if pb.get("awaiting_baseline_reason"):
+        # User can "skip" reason; otherwise store it (optional, not used elsewhere unless you want later).
+        if not skip_requested(user_text):
+            try:
+                pb.setdefault("discovery_answers", {})
+                pb["discovery_answers"]["baseline_reason"] = user_text.strip()
+            except Exception:
+                pass
+
+        pb["awaiting_baseline_reason"] = False
+
+        # If they asked for a plan earlier, resume with discovery Q1 now.
+        if pb.get("pending_plan_after_baseline"):
+            pb["pending_plan_after_baseline"] = False
+            pb["topic"] = topic_key
+            pb["step"] = "DISCOVERY"
+            pb["discovery_questions_asked"] = 1  # we are about to ask Q0, so set to 1 after asking
+            state["plan_build"] = pb
+            state["mode"] = "PLAN_BUILD"
+
+            q0 = DISCOVERY_QUESTIONS[0]
+            resp = ChatResponse(
+                messages=[_coach_msg(q0, kind="discovery_question")],
+                ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True),
+                effects=Effects(saved_confidence=saved_conf),
+                plan=None,
+            )
+
+            if resp.messages:
+                m0 = resp.messages[0]
+                state["history"].append({"role": "coach", "text": m0.text, "ts": m0.ts, "kind": (m0.kind or "coach")})
+                state["history"] = state["history"][-120:]
+            bucket.clear()
+            bucket.update(state)
+            _save_all_state(all_state)
+            return resp
+
+        # Otherwise, just go back to normal chat
+        pb["pending_plan_after_baseline"] = False
+        state["plan_build"] = pb
+
+    # If user is asking for a NEW plan, enforce baseline exists.
+    if wants_new_plan:
+        # Allow refine/show when plan exists (not blocked)
+        has_active_plan = bool(pb.get("active_plan_id")) and pb.get("topic") == topic_key and pb.get("active_plan_id") in state.get("plans", {})
+        if not has_active_plan and not has_baseline(state, topic_key) and not saved_conf:
+            # Start baseline collection
+            pb["awaiting_baseline"] = True
+            pb["awaiting_baseline_reason"] = False
+            pb["pending_plan_after_baseline"] = True
+
+            # Reset plan discovery state for a clean new plan (doesn't remove existing plans)
+            pb["topic"] = topic_key
+            pb["step"] = "DISCOVERY"
+            pb["discovery_questions_asked"] = 0
+            pb["discovery_answers"] = pb.get("discovery_answers") or {}
+            pb["locked"] = False
+            state["plan_build"] = pb
+
+            state["mode"] = "CHAT"
+            resp = ChatResponse(
+                messages=[_coach_msg(_baseline_prompt_text(topic_key), kind="baseline_prompt")],
+                ui=UIState(mode="CHAT", show_plan_sidebar=False),
+                effects=Effects(saved_confidence=False),
+                plan=None,
+            )
+
+            if resp.messages:
+                m0 = resp.messages[0]
+                state["history"].append({"role": "coach", "text": m0.text, "ts": m0.ts, "kind": (m0.kind or "coach")})
+                state["history"] = state["history"][-120:]
+            bucket.clear()
+            bucket.update(state)
+            _save_all_state(all_state)
+            return resp
+
+    # ===========================
+    # Normal flow (unchanged)
+    # ===========================
     mode, step = decide_mode_and_step(state, user_text, topic_key)
     state["mode"] = mode
 
