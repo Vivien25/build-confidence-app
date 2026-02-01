@@ -15,7 +15,7 @@ export default function Welcome() {
   return (
     <div style={styles.page}>
       <div style={styles.layout}>
-        {/* LEFT: Brand */}
+        {/* LEFT */}
         <div style={styles.left}>
           <h1 style={styles.title}>Better Me</h1>
           <p style={styles.subtitle}>
@@ -23,22 +23,28 @@ export default function Welcome() {
           </p>
         </div>
 
-        {/* RIGHT: Diagonal split coach chooser */}
+        {/* RIGHT: fills the entire right side */}
         <div style={styles.right}>
-          <div style={styles.splitCard} aria-label="Choose a coach">
+          <div style={styles.splitPanel}>
             {/* Mira side */}
             <button
               type="button"
               onClick={() => pickCoach("mira")}
-              style={{
-                ...styles.halfBase,
-                ...styles.leftHalf,
-                backgroundImage: `url(${coachMira})`,
-              }}
+              style={{ ...styles.halfBtn, ...styles.leftHalf }}
               aria-label="Choose Mira"
               title="Mira"
             >
-              <div style={styles.labelBoxLeft}>
+              {/* fill layer */}
+              <div
+                style={{
+                  ...styles.bgFill,
+                  backgroundImage: `url(${coachMira})`,
+                }}
+              />
+              {/* face-safe layer */}
+              <img src={coachMira} alt="Mira" style={styles.faceSafe} />
+
+              <div style={styles.labelLeft}>
                 <div style={styles.coachName}>Mira</div>
                 <div style={styles.coachVibe}>Compassionate</div>
               </div>
@@ -48,22 +54,26 @@ export default function Welcome() {
             <button
               type="button"
               onClick={() => pickCoach("kai")}
-              style={{
-                ...styles.halfBase,
-                ...styles.rightHalf,
-                backgroundImage: `url(${coachKai})`,
-              }}
+              style={{ ...styles.halfBtn, ...styles.rightHalf }}
               aria-label="Choose Kai"
               title="Kai"
             >
-              <div style={styles.labelBoxRight}>
+              <div
+                style={{
+                  ...styles.bgFill,
+                  backgroundImage: `url(${coachKai})`,
+                }}
+              />
+              <img src={coachKai} alt="Kai" style={styles.faceSafe} />
+
+              <div style={styles.labelRight}>
                 <div style={styles.coachName}>Kai</div>
                 <div style={styles.coachVibe}>Empowering</div>
               </div>
             </button>
 
-            {/* soft overlay so it feels like one image */}
-            <div style={styles.glowOverlay} />
+            {/* subtle unify overlay */}
+            <div style={styles.overlay} />
           </div>
 
           <div style={styles.hint}>Click a side to choose your coach.</div>
@@ -76,15 +86,17 @@ export default function Welcome() {
 const styles = {
   page: {
     minHeight: "100vh",
+    padding: "48px 24px",
     display: "flex",
     alignItems: "center",
-    padding: "48px 24px",
   },
+
+  // Make the right side feel like a real “panel”
   layout: {
-    width: "min(1100px, 96vw)",
+    width: "min(1200px, 96vw)",
     margin: "0 auto",
     display: "grid",
-    gridTemplateColumns: "1.05fr 1fr",
+    gridTemplateColumns: "520px 1fr",
     gap: 36,
     alignItems: "center",
   },
@@ -92,10 +104,10 @@ const styles = {
   left: { textAlign: "left" },
   title: {
     margin: 0,
-    fontSize: 80, // bigger
+    fontSize: 80,
     fontWeight: 900,
     letterSpacing: "-1.4px",
-    color: "#3a2f2a", // warm cocoa
+    color: "#3a2f2a",
     lineHeight: 1.02,
   },
   subtitle: {
@@ -106,71 +118,87 @@ const styles = {
     maxWidth: 520,
   },
 
-  right: { display: "grid", justifyItems: "end" },
-
-  splitCard: {
-    position: "relative",
-    width: "min(520px, 90vw)",
-    height: 320,
-    borderRadius: 24,
-    overflow: "hidden",
-    border: "1px solid rgba(58,47,42,0.18)",
-    boxShadow: "0 24px 70px rgba(0,0,0,0.12)",
-    background: "rgba(255,255,255,0.55)",
+  right: {
+    width: "100%",
   },
 
-  halfBase: {
+  // This fills the entire right column
+  splitPanel: {
+    position: "relative",
+    width: "100%",
+    height: "min(520px, 70vh)",
+    borderRadius: 26,
+    overflow: "hidden",
+    border: "1px solid rgba(58,47,42,0.18)",
+    boxShadow: "0 26px 80px rgba(0,0,0,0.14)",
+    background: "rgba(255,255,255,0.45)",
+  },
+
+  halfBtn: {
     position: "absolute",
     inset: 0,
-    width: "100%",
-    height: "100%",
     border: 0,
     padding: 0,
     margin: 0,
     cursor: "pointer",
+    background: "transparent",
+  },
+
+  leftHalf: {
+    clipPath: "polygon(0 0, 62% 0, 46% 100%, 0 100%)",
+  },
+  rightHalf: {
+    clipPath: "polygon(62% 0, 100% 0, 100% 100%, 46% 100%)",
+  },
+
+  // Background that fills space (blurred cover)
+  bgFill: {
+    position: "absolute",
+    inset: 0,
     backgroundSize: "cover",
     backgroundPosition: "center",
-    transition: "transform 160ms ease, filter 160ms ease",
-    filter: "saturate(1.05) contrast(1.02)",
+    filter: "blur(14px) saturate(1.1)",
+    transform: "scale(1.08)",
+    opacity: 0.55,
   },
 
-  // Diagonal split:
-  // left side keeps left triangle-ish region
-  leftHalf: {
-    clipPath: "polygon(0 0, 63% 0, 47% 100%, 0 100%)",
-  },
-  // right side keeps right region
-  rightHalf: {
-    clipPath: "polygon(63% 0, 100% 0, 100% 100%, 47% 100%)",
+  // Foreground that guarantees full face is visible (contain)
+  faceSafe: {
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: "100%",
+    objectFit: "contain",       // ✅ shows full face
+    objectPosition: "center",
+    filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
 
-  // soft overlay to unify image feel
-  glowOverlay: {
+  overlay: {
     position: "absolute",
     inset: 0,
     pointerEvents: "none",
     background:
-      "linear-gradient(90deg, rgba(255,255,255,0.12), rgba(255,255,255,0.06) 40%, rgba(255,255,255,0.12))",
+      "linear-gradient(90deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04) 40%, rgba(255,255,255,0.10))",
   },
 
-  labelBoxLeft: {
+  labelLeft: {
     position: "absolute",
-    left: 16,
-    bottom: 16,
+    left: 18,
+    bottom: 18,
     padding: "10px 12px",
     borderRadius: 14,
-    background: "rgba(255,255,255,0.75)",
+    background: "rgba(255,255,255,0.78)",
     border: "1px solid rgba(58,47,42,0.18)",
     backdropFilter: "blur(8px)",
     textAlign: "left",
   },
-  labelBoxRight: {
+  labelRight: {
     position: "absolute",
-    right: 16,
-    bottom: 16,
+    right: 18,
+    bottom: 18,
     padding: "10px 12px",
     borderRadius: 14,
-    background: "rgba(255,255,255,0.75)",
+    background: "rgba(255,255,255,0.78)",
     border: "1px solid rgba(58,47,42,0.18)",
     backdropFilter: "blur(8px)",
     textAlign: "left",
@@ -192,6 +220,6 @@ const styles = {
     marginTop: 10,
     fontSize: 13,
     color: "rgba(58,47,42,0.60)",
-    justifySelf: "end",
+    textAlign: "right",
   },
 };

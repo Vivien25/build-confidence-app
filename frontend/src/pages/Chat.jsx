@@ -334,7 +334,7 @@ function ConversationPlansSidebar({ plans = [] }) {
 }
 
 // -----------------------
-// Speak coach (TTS)
+// Speak coach (TTS) — FIX Kai male voice
 // -----------------------
 let _voicesCache = [];
 let _ttsUnlocked = false;
@@ -363,44 +363,80 @@ function _loadVoices() {
 
 if (typeof window !== "undefined" && window?.speechSynthesis) {
   _loadVoices();
-  window.speechSynthesis.onvoiceschanged = () => {
-    _loadVoices();
-  };
+  window.speechSynthesis.onvoiceschanged = () => _loadVoices();
 }
+
+function _norm(s) {
+  return String(s || "").toLowerCase();
+}
+
+// Stronger heuristics
+const FEMALE_DENY = /(samantha|victoria|zira|susan|karen|tessa|veena|moira|female|woman)/i;
+
+// “male-ish” names commonly available across platforms
+const MALE_PREFER = /(alex|david|mark|daniel|tom|fred|george|james|john|male|man)/i;
+
+// Some Chrome/Android voices look like “Google UK English Male”
+const GOOGLE_MALE = /(google.*english.*male|english.*male)/i;
+
+// Some Apple voiceURI strings include alex
+const VOICEURI_MALE = /(alex|david|male)/i;
 
 function _pickVoice({ coachId = "mira", preferredVoiceName = null } = {}) {
   const voices = _voicesCache.length ? _voicesCache : _loadVoices();
   if (!voices.length) return null;
 
-  if (preferredVoiceName) {
-    const exact = voices.find((v) => v.name === preferredVoiceName);
+  const isKai = _norm(coachId).includes("kai");
+
+  // Per-coach override (lets you lock a specific voice later)
+  const key = isKai ? "tts_voice_name_kai" : "tts_voice_name_mira";
+  const coachOverride =
+    (typeof localStorage !== "undefined" && localStorage.getItem(key)) || null;
+
+  const overrideName = preferredVoiceName || coachOverride;
+  if (overrideName) {
+    const exact = voices.find((v) => v.name === overrideName);
     if (exact) return exact;
   }
 
-  const isKai = String(coachId || "").toLowerCase().includes("kai");
-
+  // Prefer English first
   const english = voices.filter((v) => /en/i.test(v.lang));
   const pool = english.length ? english : voices;
 
-  const maleHints = /(male|man|david|mark|alex|daniel|tom|fred|george|john|microsoft david)/i;
-  const femaleHints = /(female|woman|zira|susan|samantha|victoria|karen|moira|tessa|veena)/i;
+  // Helper lists
+  const enUS = pool.filter((v) => /en-US/i.test(v.lang));
+  const enAny = pool;
 
   if (isKai) {
-    return (
-      pool.find((v) => /en-US/i.test(v.lang) && maleHints.test(v.name)) ||
-      pool.find((v) => maleHints.test(v.name)) ||
-      pool.find((v) => /en-US/i.test(v.lang) && !femaleHints.test(v.name)) ||
-      pool.find((v) => !femaleHints.test(v.name)) ||
-      pool[0]
-    );
+    // 1) Best: en-US and matches male-ish and NOT female-ish
+    const best1 =
+      enUS.find((v) => MALE_PREFER.test(v.name) && !FEMALE_DENY.test(v.name)) ||
+      enUS.find((v) => GOOGLE_MALE.test(v.name) && !FEMALE_DENY.test(v.name)) ||
+      enUS.find((v) => VOICEURI_MALE.test(v.voiceURI) && !FEMALE_DENY.test(v.name));
+
+    if (best1) return best1;
+
+    // 2) Any English male-ish not female-ish
+    const best2 =
+      enAny.find((v) => MALE_PREFER.test(v.name) && !FEMALE_DENY.test(v.name)) ||
+      enAny.find((v) => GOOGLE_MALE.test(v.name) && !FEMALE_DENY.test(v.name)) ||
+      enAny.find((v) => VOICEURI_MALE.test(v.voiceURI) && !FEMALE_DENY.test(v.name));
+
+    if (best2) return best2;
+
+    // 3) Fallback: en-US that is NOT female-ish
+    const best3 = enUS.find((v) => !FEMALE_DENY.test(v.name)) || enAny.find((v) => !FEMALE_DENY.test(v.name));
+    return best3 || pool[0];
   }
 
-  return (
-    pool.find((v) => /en-US/i.test(v.lang) && femaleHints.test(v.name)) ||
-    pool.find((v) => femaleHints.test(v.name)) ||
-    pool.find((v) => /en-US/i.test(v.lang)) ||
-    pool[0]
-  );
+  // Mira default: prefer female-ish, then any en-US
+  const female =
+    enUS.find((v) => FEMALE_DENY.test(v.name)) ||
+    enAny.find((v) => FEMALE_DENY.test(v.name)) ||
+    enUS[0] ||
+    enAny[0];
+
+  return female || pool[0];
 }
 
 export function speakCoach(text, opts = {}) {
@@ -415,18 +451,19 @@ export function speakCoach(text, opts = {}) {
 
     const safe = s.length > 900 ? s.slice(0, 900) : s;
 
-    const preferredVoiceName =
-      (typeof localStorage !== "undefined" && localStorage.getItem("tts_voice_name")) || null;
-
     const coachId = opts.coachId || "mira";
-    const chosen = _pickVoice({ coachId, preferredVoiceName });
+    const chosen = _pickVoice({ coachId });
 
     window.speechSynthesis.cancel();
 
     const u = new SpeechSynthesisUtterance(safe);
     u.rate = 1.0;
     u.pitch = 1.0;
-    u.lang = "en-US";
+
+    // IMPORTANT: match lang to the chosen voice
+    if (chosen?.lang) u.lang = chosen.lang;
+    else u.lang = "en-US";
+
     if (chosen) u.voice = chosen;
 
     setTimeout(() => {
@@ -435,9 +472,8 @@ export function speakCoach(text, opts = {}) {
       } catch {}
     }, 0);
 
-    // keep a hint flag; some browsers block until user gesture
     if (!_ttsUnlocked) {
-      // no-op, but we don't throw
+      // still ok — just means the browser might block until a click
     }
   } catch {}
 }
