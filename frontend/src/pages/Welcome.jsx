@@ -34,7 +34,7 @@ export default function Welcome() {
               title="Mira"
             >
               <div style={styles.backdropLeft} />
-              <img src={coachMira} alt="Mira" style={styles.faceSafe} />
+              <img src={coachMira} alt="Mira" style={styles.faceSafeLeft} />
 
               <div style={styles.labelLeft}>
                 <div style={styles.coachName}>Mira</div>
@@ -50,7 +50,7 @@ export default function Welcome() {
               title="Kai"
             >
               <div style={styles.backdropRight} />
-              <img src={coachKai} alt="Kai" style={styles.faceSafe} />
+              <img src={coachKai} alt="Kai" style={styles.faceSafeRight} />
 
               <div style={styles.labelRight}>
                 <div style={styles.coachName}>Kai</div>
@@ -106,7 +106,7 @@ const styles = {
   splitPanel: {
     position: "relative",
     width: "100%",
-    height: "min(640px, 78vh)", // ✅ taller: fills right side
+    height: "min(640px, 78vh)",
     borderRadius: 26,
     overflow: "hidden",
     border: "1px solid rgba(58,47,42,0.18)",
@@ -122,10 +122,8 @@ const styles = {
     margin: 0,
     cursor: "pointer",
     background: "transparent",
-    transition: "transform 140ms ease",
   },
 
-  // slightly more balanced split
   leftHalf: {
     clipPath: "polygon(0 0, 66% 0, 48% 100%, 0 100%)",
   },
@@ -146,14 +144,23 @@ const styles = {
       "radial-gradient(900px 600px at 70% 30%, rgba(255,233,215,0.80), rgba(255,255,255,0.50) 55%, rgba(227,139,109,0.18))",
   },
 
-  // ✅ bigger portrait without cropping the face harshly
-  faceSafe: {
+  // ✅ Larger + shifted slightly for each side
+  faceSafeLeft: {
     position: "absolute",
-    inset: "-4% -6%",     // ✅ visually “zoom in”
-    width: "112%",
-    height: "108%",
+    inset: "-6% -8%",
+    width: "116%",
+    height: "112%",
     objectFit: "contain",
-    objectPosition: "center",
+    objectPosition: "42% center", // Mira a bit left
+    filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
+  },
+  faceSafeRight: {
+    position: "absolute",
+    inset: "-6% -8%",
+    width: "116%",
+    height: "112%",
+    objectFit: "contain",
+    objectPosition: "58% center", // Kai a bit right
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
 
