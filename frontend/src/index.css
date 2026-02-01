@@ -144,3 +144,34 @@
       padding: 16px !important;
     }
   }
+
+  /* ===== Welcome page typography ===== */
+
+.welcome-title {
+  font-size: 44px;
+  font-weight: 800;
+  letter-spacing: -0.8px;
+  color: #3a2f2a; /* warm cocoa */
+}
+
+.welcome-subtitle {
+  color: rgba(58, 47, 42, 0.72);
+  font-size: 16px;
+}
+
+/* Warm outline button */
+.welcome-btn {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(58, 47, 42, 0.28);
+  color: #3a2f2a;
+  border-radius: 14px;
+  padding: 12px 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.welcome-btn:hover {
+  background: rgba(255, 255, 255, 0.88);
+  transform: translateY(-1px);
+}
