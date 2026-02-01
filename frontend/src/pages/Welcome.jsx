@@ -168,11 +168,11 @@ const styles = {
 
   faceSafeRight: {
     position: "absolute",
-    inset: "-6% -7%",
+    inset: "-6% -10%",
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "82% center",
+    objectPosition: "95% center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",
   },
