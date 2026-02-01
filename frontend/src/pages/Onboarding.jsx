@@ -3,10 +3,14 @@ import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { getProfile, saveProfile } from "../utils/profile";
 
-// ✅ avatar images (adjust paths/names to match your assets)
+// ✅ user avatar images
 import userFem from "../assets/avatars/user_fem.png";
 import userMasc from "../assets/avatars/user_masc.png";
 import userNeutral from "../assets/avatars/user_neutral.png";
+
+// ✅ coach avatar images
+import coachMira from "../assets/avatars/coach_mira.png";
+import coachKai from "../assets/avatars/coach_kai.png";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
@@ -16,6 +20,11 @@ const AVATARS = [
   { id: "neutral", label: "Neutral", img: userNeutral },
 ];
 
+const COACHES = [
+  { id: "mira", name: "Mira", vibe: "Compassionate", img: coachMira },
+  { id: "kai", name: "Kai", vibe: "Empowering", img: coachKai },
+];
+
 export default function Onboarding() {
   const navigate = useNavigate();
   const existing = useMemo(() => getProfile(), []);
@@ -23,6 +32,9 @@ export default function Onboarding() {
   const [name, setName] = useState(existing?.name ?? "");
   const [email, setEmail] = useState(existing?.email ?? "");
   const [avatar, setAvatar] = useState(existing?.avatar ?? "neutral");
+
+  // ✅ add coach selection here too
+  const [coachId, setCoachId] = useState(existing?.coachId ?? "mira");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -56,7 +68,7 @@ export default function Onboarding() {
         name: res.data.name,
         email: res.data.email,
         avatar,
-        coachId: existing?.coachId || "mira", // keep your default
+        coachId, // ✅ save selected coach
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
@@ -79,11 +91,7 @@ export default function Onboarding() {
           </p>
         </div>
 
-        {error && (
-          <div style={styles.errorBox}>
-            {error}
-          </div>
-        )}
+        {error && <div style={styles.errorBox}>{error}</div>}
 
         {/* Name + Email */}
         <div style={styles.grid2}>
@@ -111,11 +119,10 @@ export default function Onboarding() {
           </div>
         </div>
 
-        {/* Avatar cards */}
+        {/* Avatar style */}
         <div style={{ marginTop: 18 }}>
           <div style={styles.sectionTitle}>Choose your avatar</div>
-
-          <div style={styles.avatarRow}>
+          <div style={styles.cardRow}>
             {AVATARS.map((a) => {
               const selected = avatar === a.id;
               return (
@@ -124,8 +131,8 @@ export default function Onboarding() {
                   type="button"
                   onClick={() => setAvatar(a.id)}
                   style={{
-                    ...styles.avatarCard,
-                    ...(selected ? styles.avatarCardSelected : {}),
+                    ...styles.choiceCard,
+                    ...(selected ? styles.choiceCardSelected : {}),
                   }}
                   aria-pressed={selected}
                 >
@@ -133,13 +140,50 @@ export default function Onboarding() {
                     src={a.img}
                     alt={a.label}
                     style={{
-                      ...styles.avatarImg,
-                      ...(selected ? styles.avatarImgSelected : {}),
+                      ...styles.circleImg,
+                      ...(selected ? styles.circleImgSelected : {}),
                     }}
                   />
                   <div style={{ fontWeight: 800 }}>{a.label}</div>
                   <div className="muted" style={{ fontSize: 13 }}>
                     {selected ? "Selected" : "Tap to choose"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ✅ Coach selection */}
+        <div style={{ marginTop: 18 }}>
+          <div style={styles.sectionTitle}>Meet your growth coach</div>
+          <div style={{ ...styles.cardRow, gridTemplateColumns: "repeat(2, 1fr)" }}>
+            {COACHES.map((c) => {
+              const selected = coachId === c.id;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setCoachId(c.id)}
+                  style={{
+                    ...styles.choiceCard,
+                    ...(selected ? styles.choiceCardSelected : {}),
+                    paddingTop: 16,
+                    paddingBottom: 16,
+                  }}
+                  aria-pressed={selected}
+                >
+                  <img
+                    src={c.img}
+                    alt={c.name}
+                    style={{
+                      ...styles.circleImg,
+                      ...(selected ? styles.circleImgSelected : {}),
+                    }}
+                  />
+                  <div style={{ fontWeight: 900 }}>{c.name}</div>
+                  <div className="muted" style={{ fontSize: 13 }}>
+                    {c.vibe}
                   </div>
                 </button>
               );
@@ -171,7 +215,7 @@ const styles = {
     padding: 18,
   },
   shell: {
-    width: "min(900px, 96vw)",
+    width: "min(920px, 96vw)",
     padding: 22,
   },
   header: {
@@ -216,12 +260,12 @@ const styles = {
     gridTemplateColumns: "1fr 1fr",
     gap: 14,
   },
-  avatarRow: {
+  cardRow: {
     display: "grid",
     gridTemplateColumns: "repeat(3, 1fr)",
     gap: 12,
   },
-  avatarCard: {
+  choiceCard: {
     borderRadius: 18,
     border: "1px solid var(--border)",
     background: "var(--surface2)",
@@ -231,13 +275,13 @@ const styles = {
     boxShadow: "0 10px 26px rgba(43,42,39,0.08)",
     transition: "transform 120ms ease, box-shadow 120ms ease",
   },
-  avatarCardSelected: {
+  choiceCardSelected: {
     border: "1px solid rgba(227,139,109,0.55)",
     boxShadow: "0 16px 40px rgba(227,139,109,0.22)",
     transform: "translateY(-1px)",
     background: "rgba(255,255,255,0.82)",
   },
-  avatarImg: {
+  circleImg: {
     width: 62,
     height: 62,
     borderRadius: 999,
@@ -246,7 +290,7 @@ const styles = {
     boxShadow: "0 10px 26px rgba(43,42,39,0.10)",
     marginBottom: 10,
   },
-  avatarImgSelected: {
+  circleImgSelected: {
     boxShadow: "0 14px 32px rgba(227,139,109,0.28)",
   },
 };
