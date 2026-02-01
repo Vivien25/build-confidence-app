@@ -176,7 +176,7 @@ const styles = {
     /* 🔪 crop to left 66% */
     clipPath: "inset(0 34% 0 0)",
   
-    transform: "scale(1.08) translateX(28%)", // ✅ more right
+    transform: "scale(1.05) translateX(30%)", // ✅ more right
     transformOrigin: "center",
   
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
