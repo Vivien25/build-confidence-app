@@ -156,11 +156,11 @@ const styles = {
   },
   faceSafeRight: {
     position: "absolute",
-    inset: "-8% -10%",
+    inset: "-7% -9%",
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "90% center", // Kai a bit right
+    objectPosition: "120% center", // Kai a bit right
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
 
