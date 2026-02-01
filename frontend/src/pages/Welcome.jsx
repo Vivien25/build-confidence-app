@@ -26,10 +26,15 @@ export default function Welcome() {
         {/* RIGHT */}
         <div style={styles.right}>
           <div style={styles.splitPanel}>
-            <button
-              type="button"
+            {/* LEFT SIDE (Mira) — wrapper is clipped, so it won't overlap */}
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => pickCoach("mira")}
-              style={{ ...styles.halfBtn, ...styles.leftHalf }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") pickCoach("mira");
+              }}
+              style={styles.leftWrap}
               aria-label="Choose Mira"
               title="Mira"
             >
@@ -40,12 +45,17 @@ export default function Welcome() {
                 <div style={styles.coachName}>Mira</div>
                 <div style={styles.coachVibe}>Compassionate</div>
               </div>
-            </button>
+            </div>
 
-            <button
-              type="button"
+            {/* RIGHT SIDE (Kai) — wrapper is clipped, so it won't overlap */}
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => pickCoach("kai")}
-              style={{ ...styles.halfBtn, ...styles.rightHalf }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") pickCoach("kai");
+              }}
+              style={styles.rightWrap}
               aria-label="Choose Kai"
               title="Kai"
             >
@@ -56,8 +66,9 @@ export default function Welcome() {
                 <div style={styles.coachName}>Kai</div>
                 <div style={styles.coachVibe}>Empowering</div>
               </div>
-            </button>
+            </div>
 
+            {/* subtle unify overlay */}
             <div style={styles.overlay} />
           </div>
 
@@ -114,21 +125,20 @@ const styles = {
     background: "rgba(255,255,255,0.45)",
   },
 
-  halfBtn: {
+  // ✅ IMPORTANT: each wrapper is clipped so images never overlap
+  leftWrap: {
     position: "absolute",
     inset: 0,
-    border: 0,
-    padding: 0,
-    margin: 0,
-    cursor: "pointer",
-    background: "transparent",
-  },
-
-  leftHalf: {
     clipPath: "polygon(0 0, 60% 0, 42% 100%, 0 100%)",
+    cursor: "pointer",
+    outline: "none",
   },
-  rightHalf: {
+  rightWrap: {
+    position: "absolute",
+    inset: 0,
     clipPath: "polygon(60% 0, 100% 0, 100% 100%, 42% 100%)",
+    cursor: "pointer",
+    outline: "none",
   },
 
   backdropLeft: {
@@ -151,19 +161,21 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "40% center", // ✅ Mira slightly left (not extreme)
+    objectPosition: "40% center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
+    pointerEvents: "none",
   },
-  
+
   faceSafeRight: {
     position: "absolute",
     inset: "-6% -8%",
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "72% center", // ✅ Kai right but still visible
+    objectPosition: "72% center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
-  },  
+    pointerEvents: "none",
+  },
 
   overlay: {
     position: "absolute",
@@ -183,6 +195,7 @@ const styles = {
     border: "1px solid rgba(58,47,42,0.18)",
     backdropFilter: "blur(8px)",
     textAlign: "left",
+    pointerEvents: "none",
   },
   labelRight: {
     position: "absolute",
@@ -194,6 +207,7 @@ const styles = {
     border: "1px solid rgba(58,47,42,0.18)",
     backdropFilter: "blur(8px)",
     textAlign: "left",
+    pointerEvents: "none",
   },
 
   coachName: {
