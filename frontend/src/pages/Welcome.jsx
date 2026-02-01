@@ -1,7 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { saveProfile } from "../utils/profile";
 
-// coach avatars (you already have these)
 import coachMira from "../assets/avatars/coach_mira.png";
 import coachKai from "../assets/avatars/coach_kai.png";
 
@@ -9,14 +8,13 @@ export default function Welcome() {
   const navigate = useNavigate();
 
   const pickCoach = (coachId) => {
-    // only save coach choice here
     saveProfile({ coachId });
-    navigate("/intro"); // keep your existing flow
+    navigate("/intro");
   };
 
   return (
     <div style={styles.page}>
-      <div style={styles.center}>
+      <div style={styles.content}>
         {/* Title */}
         <h1 style={styles.title}>Better Me</h1>
 
@@ -25,21 +23,15 @@ export default function Welcome() {
           Your friendly coach to grow confidence, one step at a time.
         </p>
 
-        {/* Coach selection */}
-        <div style={styles.coachWrap}>
-          <button
-            style={styles.coachCard}
-            onClick={() => pickCoach("mira")}
-          >
+        {/* Coach cards */}
+        <div style={styles.coachRow}>
+          <button style={styles.coachCard} onClick={() => pickCoach("mira")}>
             <img src={coachMira} alt="Mira" style={styles.avatar} />
             <div style={styles.coachName}>Mira</div>
             <div style={styles.coachDesc}>Compassionate</div>
           </button>
 
-          <button
-            style={styles.coachCard}
-            onClick={() => pickCoach("kai")}
-          >
+          <button style={styles.coachCard} onClick={() => pickCoach("kai")}>
             <img src={coachKai} alt="Kai" style={styles.avatar} />
             <div style={styles.coachName}>Kai</div>
             <div style={styles.coachDesc}>Empowering</div>
@@ -55,56 +47,57 @@ export default function Welcome() {
 const styles = {
   page: {
     minHeight: "100vh",
-    display: "grid",
-    placeItems: "center",
-    padding: 24,
+    display: "flex",
+    alignItems: "center",
+    paddingLeft: "8vw",   // left breathing space
+    paddingRight: 24,
   },
-  center: {
-    textAlign: "center",
-    maxWidth: 520,
+  content: {
+    maxWidth: 560,
   },
   title: {
-    fontSize: 48,
-    fontWeight: 800,
-    letterSpacing: "-0.8px",
-    color: "#3a2f2a", // warm cocoa
-    marginBottom: 12,
+    fontSize: 72,              // MUCH larger
+    fontWeight: 900,
+    letterSpacing: "-1.2px",
+    color: "#3a2f2a",          // warm cocoa
+    margin: "0 0 16px 0",
   },
   subtitle: {
-    fontSize: 16,
-    lineHeight: 1.6,
+    fontSize: 18,
+    lineHeight: 1.7,
     color: "rgba(58,47,42,0.72)",
-    marginBottom: 36,
+    margin: "0 0 40px 0",
   },
-  coachWrap: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 16,
+  coachRow: {
+    display: "flex",
+    gap: 20,
   },
   coachCard: {
-    background: "rgba(255,255,255,0.75)",
+    width: 220,
+    background: "rgba(255,255,255,0.78)",
     border: "1px solid rgba(58,47,42,0.25)",
-    borderRadius: 18,
-    padding: "18px 14px",
+    borderRadius: 20,
+    padding: "20px 18px",
+    textAlign: "left",        // left aligned card text
     cursor: "pointer",
+    boxShadow: "0 14px 36px rgba(0,0,0,0.10)",
     transition: "all 140ms ease",
-    boxShadow: "0 12px 30px rgba(0,0,0,0.08)",
   },
   avatar: {
     width: 64,
     height: 64,
     borderRadius: 999,
     objectFit: "cover",
-    marginBottom: 10,
-    boxShadow: "0 8px 20px rgba(0,0,0,0.15)",
+    marginBottom: 14,
+    boxShadow: "0 8px 22px rgba(0,0,0,0.15)",
   },
   coachName: {
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: 800,
     color: "#3a2f2a",
   },
   coachDesc: {
-    fontSize: 13,
+    fontSize: 14,
     color: "rgba(58,47,42,0.65)",
   },
 };

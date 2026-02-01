@@ -218,7 +218,11 @@ function adaptBackendPlanToUI(plan, focus, needKey, needLabel) {
 // ✅ Convert backend history rows into UI messages (text + 12h check-in buttons)
 function historyRowToUiMessage(h) {
   const ts = h?.ts || new Date().toISOString();
-  const role = String(h?.role || "");
+
+  let role = String(h?.role || "").toLowerCase().trim();
+  // ✅ normalize backend roles
+  if (role === "coach") role = "assistant";
+
   const text = String(h?.text || "");
   const kind = h?.kind || null;
 
@@ -235,7 +239,7 @@ function historyRowToUiMessage(h) {
     };
   }
 
-  // coach
+  // assistant (coach)
   if (kind === "checkin_12h") {
     return {
       id: `h_${backend_key}`,
@@ -330,7 +334,7 @@ function ConversationPlansSidebar({ plans = [] }) {
 }
 
 // -----------------------
-// (Optional) Speak coach
+// Speak coach (TTS)
 // -----------------------
 function speakCoach(text) {
   try {
@@ -339,21 +343,21 @@ function speakCoach(text) {
     const s = String(text || "").trim();
     if (!s) return;
 
-    // Some browsers need voices warmed up before they can speak reliably.
-    // We attempt to fetch voices; if none, we retry a few times.
+    // ✅ avoid speaking code blocks / super long content
+    const safe = s.length > 900 ? s.slice(0, 900) : s;
+
     const trySpeak = (attempt = 0) => {
       try {
         const voices = window.speechSynthesis.getVoices?.() || [];
 
-        // If voices aren't loaded yet, retry shortly.
-        if (!voices.length && attempt < 4) {
+        if (!voices.length && attempt < 6) {
           setTimeout(() => trySpeak(attempt + 1), 250);
           return;
         }
 
         window.speechSynthesis.cancel();
 
-        const u = new SpeechSynthesisUtterance(s);
+        const u = new SpeechSynthesisUtterance(safe);
         u.rate = 1.0;
         u.pitch = 1.0;
         u.lang = "en-US";
@@ -365,7 +369,6 @@ function speakCoach(text) {
 
         if (preferred) u.voice = preferred;
 
-        // async speak avoids “silent speak” in some browsers
         setTimeout(() => {
           try {
             window.speechSynthesis.speak(u);
@@ -396,7 +399,6 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
   if (backendMessages.length > 0) {
     const toAdd = backendMessages
       .map((m) => {
-        // Support both object rows and legacy string messages
         if (typeof m === "string") {
           const text = String(m || "").trim();
           if (!text) return null;
@@ -417,17 +419,23 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
           };
         }
 
-        const role = String(m?.role || "assistant");
+        // ✅ normalize backend role
+        let roleRaw = String(m?.role || "assistant").toLowerCase().trim();
+        if (roleRaw === "coach") roleRaw = "assistant";
+
         const text = String(m?.text || "").trim();
         const kind = String(m?.kind || "");
-        // Backend should provide stable ts for Fix A
         const ts = String(m?.ts || m?.timestamp || m?.created_at || new Date().toISOString());
         if (!text) return null;
 
-        const backend_key = `${ts}|${role}|${kind}|${text}`;
-        if (role === "assistant") lastAssistantText = text;
+        const backend_key = `${ts}|${roleRaw}|${kind}|${text}`;
 
-        if (role === "user") {
+        // ✅ treat normalized assistant as speakable
+        if (roleRaw === "assistant") {
+          lastAssistantText = text;
+        }
+
+        if (roleRaw === "user") {
           return {
             id: uid("msg"),
             backend_key,
@@ -439,7 +447,6 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
           };
         }
 
-        // assistant
         return {
           id: uid("msg"),
           backend_key,
@@ -512,7 +519,6 @@ export default function Chat() {
       if (!window?.speechSynthesis) return;
 
       const warm = () => {
-        // trigger load
         window.speechSynthesis.getVoices();
         ttsReadyRef.current = true;
       };
@@ -649,7 +655,7 @@ export default function Chat() {
     const nLabel = currentNeedLabel();
 
     setAwaitingBaseline(true);
-    saveSession(`${uiKey}_awaitBaseline`, true); // ✅ ensure persistence immediately
+    saveSession(`${uiKey}_awaitBaseline`, true);
 
     upsertSystemMessage(setMessages, {
       id: `system_baseline_${focus}_${needSlug}`,
@@ -661,10 +667,26 @@ export default function Chat() {
     });
   }
 
-  // ✅ FIX #3: boolean return
+  // ✅ FIX: boolean return
   function userAskedForPlan(text) {
     const t = String(text || "").toLowerCase();
     return /\b(plan|steps|roadmap|action items|what should i do|next steps|schedule)\b/.test(t);
+  }
+
+  // ✅ NEW: voice reminder is a SYSTEM message and upserted (no duplicates)
+  function upsertVoiceBaselineReminder() {
+    const baseline = getLocalBaseline();
+    if (baseline != null) return;
+    if (awaitingBaseline || awaitingBaselineReason) return; // don't stack prompts
+    upsertSystemMessage(setMessages, {
+      id: `system_voice_note_${focus}_${needSlug}`,
+      role: "assistant",
+      type: "system",
+      kind: "voice_baseline_note",
+      mode: "coach",
+      message: "Quick note: if you’re going to ask for a plan, I’ll need your 1–10 confidence baseline first. You can also type a number anytime (like “6”).",
+      ts: new Date().toISOString(),
+    });
   }
 
   // ✅ Load local cached chat immediately, then sync backend history (Option B)
@@ -692,7 +714,6 @@ export default function Chat() {
         setMessages((prev) => {
           const prevArr = Array.isArray(prev) ? prev : [];
           const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
-          // ✅ if we're waiting for baseline input, don't inject backend messages on top
           if (awaitingBaseline || awaitingBaselineReason) return prevArr;
           const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
           if (toAdd.length === 0) return prevArr;
@@ -780,7 +801,8 @@ export default function Chat() {
             (m.kind === "baseline_prompt" ||
               m.kind === "baseline_reason_prompt" ||
               m.kind === "daily_prompt" ||
-              m.kind === "daily_conf_prompt")
+              m.kind === "daily_conf_prompt" ||
+              m.kind === "voice_baseline_note")
           )
       )
     );
@@ -888,10 +910,8 @@ export default function Chat() {
       const { lastAssistantText } = applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, currentNeedLabel());
 
       // ✅ Speak the coach response (TTS)
-      if (lastAssistantText) {
-        // If voices are not ready yet, speakCoach will retry internally.
-        speakCoach(lastAssistantText);
-      }
+      // (Only speak real coach replies; system prompts are not spoken because backend doesn’t send them as assistant text here)
+      if (lastAssistantText) speakCoach(lastAssistantText);
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
 
@@ -1011,22 +1031,18 @@ export default function Chat() {
     const userText = input.trim();
     setInput("");
 
-    // ✅ mark the user as active (same as before)
     if (!isGreeting(userText)) setHasUserSpoken(true);
 
-    // ✅ if they asked for a plan, we want baseline
     const askedForPlan = userAskedForPlan(userText);
     const isJustConfidenceNumber = parseConfidence(userText) != null;
 
     if (!readyForBaseline && askedForPlan && !isJustConfidenceNumber) setReadyForBaseline(true);
 
-    // ✅ show the user's message immediately (same as before)
     setMessages((prev) => [
       ...prev,
       { id: uid("msg"), role: "user", text: userText, type: "text", ts: new Date().toISOString() },
     ]);
 
-    // ✅ ENFORCEMENT: if plan requested but no baseline yet, prompt baseline and stop.
     const baseline = getLocalBaseline();
     if (askedForPlan && !isJustConfidenceNumber && baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
       promptBaselineNow();
@@ -1132,24 +1148,8 @@ export default function Chat() {
       return;
     }
 
-    // ✅ Gentle guard: if baseline is missing, remind user before voice (voice transcript may include “plan”).
-    // We still allow voice chat, but this reduces “plan without baseline” incidents via voice.
-    const baseline = getLocalBaseline();
-    if (baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
-      // Not blocking—just a helpful reminder.
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: uid("msg"),
-          role: "assistant",
-          type: "text",
-          mode: "coach",
-          message:
-            "Quick note: if you’re going to ask for a plan, I’ll need your 1–10 confidence baseline first. You can also type a number anytime (like “6”).",
-          ts: new Date().toISOString(),
-        },
-      ]);
-    }
+    // ✅ FIX: don’t append repeated “quick note”. Upsert a system reminder ONCE.
+    upsertVoiceBaselineReminder();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1175,7 +1175,6 @@ export default function Chat() {
 
           const blob = new Blob(audioChunksRef.current, { type: mr.mimeType || "audio/webm" });
 
-          // ✅ Prevent empty uploads -> avoids EOFError on server
           if (!blob || blob.size < 2000) {
             setMessages((prev) => [
               ...prev,
@@ -1200,7 +1199,6 @@ export default function Chat() {
         }
       };
 
-      // ✅ timeslice ensures chunks are flushed periodically
       mr.start(250);
       setRecording(true);
     } catch {
@@ -1218,7 +1216,6 @@ export default function Chat() {
     try {
       const mr = mediaRecorderRef.current;
       if (mr && mr.state !== "inactive") {
-        // ✅ flush buffered data before stop (important!)
         try {
           mr.requestData();
         } catch {}
@@ -1249,7 +1246,6 @@ export default function Chat() {
       form.append("topic", topic);
       form.append("profile_json", JSON.stringify(profile || {}));
 
-      // choose filename extension based on blob.type (helps decoders sometimes)
       const ext = String(blob.type || "").includes("ogg") ? "ogg" : "webm";
       form.append("audio", blob, `voice.${ext}`);
 
@@ -1273,7 +1269,7 @@ export default function Chat() {
         currentNeedLabel()
       );
 
-      // ✅ Speak coach response for voice path too
+      // ✅ FIX: will now speak because role "coach" is normalized -> assistant
       if (lastAssistantText) speakCoach(lastAssistantText);
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
@@ -1307,13 +1303,11 @@ export default function Chat() {
     setConvPlans([]);
   };
 
-  // ✅ NEW #1: reset baseline only (current focus + need)
   const resetBaseline = () => {
     try {
       localStorage.removeItem(confidenceKey);
     } catch {}
 
-    // reset baseline-related UX flags for this need
     setAwaitingBaseline(false);
     setAwaitingBaselineReason(false);
     setAwaitingDailyConfidence(false);
@@ -1324,14 +1318,19 @@ export default function Chat() {
       sessionStorage.removeItem(`${uiKey}_awaitDailyConfidence`);
     } catch {}
 
-    // remove any baseline system prompts currently shown
     setMessages((prev) =>
       (prev || []).filter(
-        (m) => !(m.type === "system" && (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt"))
+        (m) =>
+          !(
+            m.type === "system" &&
+            (m.kind === "baseline_prompt" ||
+              m.kind === "baseline_reason_prompt" ||
+              m.kind === "daily_conf_prompt" ||
+              m.kind === "voice_baseline_note")
+          )
       )
     );
 
-    // confirm in chat (assistant message)
     setMessages((prev) => [
       ...prev,
       {
@@ -1458,7 +1457,6 @@ export default function Chat() {
             Change focus
           </button>
 
-          {/* ✅ NEW button #1 */}
           <button onClick={resetBaseline} style={styles.btn} disabled={loading}>
             Reset confidence baseline
           </button>
