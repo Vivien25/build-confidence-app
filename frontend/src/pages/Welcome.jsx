@@ -125,10 +125,10 @@ const styles = {
   },
 
   leftHalf: {
-    clipPath: "polygon(0 0, 66% 0, 48% 100%, 0 100%)",
+    clipPath: "polygon(0 0, 60% 0, 42% 100%, 0 100%)",
   },
   rightHalf: {
-    clipPath: "polygon(66% 0, 100% 0, 100% 100%, 48% 100%)",
+    clipPath: "polygon(60% 0, 100% 0, 100% 100%, 42% 100%)",
   },
 
   backdropLeft: {
@@ -151,18 +151,19 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "10% center", // Mira a bit left
+    objectPosition: "40% center", // ✅ Mira slightly left (not extreme)
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
+  
   faceSafeRight: {
     position: "absolute",
-    inset: "-7% -9%",
+    inset: "-6% -8%",
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "120% center", // Kai a bit right
+    objectPosition: "72% center", // ✅ Kai right but still visible
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
-  },
+  },  
 
   overlay: {
     position: "absolute",
