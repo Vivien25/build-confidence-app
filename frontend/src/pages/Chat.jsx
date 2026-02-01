@@ -83,11 +83,6 @@ function isGreeting(text) {
   return /^(hi|hello|hey|hiya|yo)[!.\s]*$/.test(t);
 }
 
-function userAskedForPlan(text) {
-  const t = String(text || "").toLowerCase();
-  return /\b(plan|steps|roadmap|action items|what should i do|next steps|help me|can you help|strategy|schedule)\b/.test(t);
-}
-
 // ---------- Mermaid component ----------
 function MermaidDiagram({ code }) {
   const ref = useRef(null);
@@ -529,8 +524,40 @@ export default function Chat() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
 
+  // ✅ helper: any prompt currently blocking normal chat?
   function anyPromptActive() {
     return awaitingBaseline || awaitingBaselineReason || awaitingDailyProgress || awaitingDailyConfidence;
+  }
+
+  // ✅ helper: read baseline from local storage
+  function getLocalBaseline() {
+    const conf = loadSaved(confidenceKey, null);
+    return conf && typeof conf.baseline === "number" ? conf.baseline : null;
+  }
+
+  // ✅ helper: show baseline prompt immediately
+  function promptBaselineNow() {
+    const fLabel = focusLabel(focus);
+    const nLabel = currentNeedLabel();
+  
+    setAwaitingBaseline(true);
+    saveSession(`${uiKey}_awaitBaseline`, true); // ✅ ensure persistence immediately
+  
+    upsertSystemMessage(setMessages, {
+      id: `system_baseline_${focus}_${needSlug}`,
+      role: "assistant",
+      type: "system",
+      kind: "baseline_prompt",
+      mode: "coach",
+      message: `Before I build a plan for **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
+    });
+  }
+  
+
+  // ✅ helper: same regex/logic you already use
+  function userAskedForPlan(text) {
+    const t = String(text || "").toLowerCase();
+    return /\b(plan|steps|roadmap|action items|what should i do|next steps|schedule)\b/;
   }
 
   // ✅ Load local cached chat immediately, then sync backend history (Option B)
@@ -558,16 +585,20 @@ export default function Chat() {
         setMessages((prev) => {
           const prevArr = Array.isArray(prev) ? prev : [];
           const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
-          const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
-          if (toAdd.length === 0) return prevArr;
-          return [...prevArr, ...toAdd];
+          // ✅ if we're waiting for baseline input, don't inject backend messages on top
+         if (awaitingBaseline || awaitingBaselineReason) return prevArr;
+         const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
+         if (toAdd.length === 0) return prevArr;
+         return [...prevArr, ...toAdd];
+
         });
       } catch {
         // ignore
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatKey, userId, focus, needKey, customNeedLabel, coachId]);
+  }, [chatKey, userId, focus, needKey, customNeedLabel, coachId, awaitingBaseline, awaitingBaselineReason]);
+
 
   // Persist chat
   useEffect(() => {
@@ -828,51 +859,91 @@ export default function Chat() {
   const sendMessage = async () => {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
-
+  
     if (needKey === "custom" && !customNeedLabel.trim()) {
       setMessages((prev) => [
         ...prev,
-        { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)', ts: new Date().toISOString() },
+        {
+          id: uid("msg"),
+          role: "assistant",
+          type: "text",
+          mode: "coach",
+          message: 'Quick one — what would you like to call this confidence area? (Example: “Executive presence”)',
+          ts: new Date().toISOString(),
+        },
       ]);
       return;
     }
-
+  
     sendingRef.current = true;
-
+  
     const userText = input.trim();
     setInput("");
-    setLoading(true);
-
+  
+    // ✅ mark the user as active (same as before)
     if (!isGreeting(userText)) setHasUserSpoken(true);
-    if (!readyForBaseline && userAskedForPlan(userText)) setReadyForBaseline(true);
+  
+    // ✅ if they asked for a plan, we want baseline
+    const askedForPlan = userAskedForPlan(userText);
+    const isJustConfidenceNumber = parseConfidence(userText) != null;
 
-    setMessages((prev) => [...prev, { id: uid("msg"), role: "user", text: userText, type: "text", ts: new Date().toISOString() }]);
+    if (!readyForBaseline && askedForPlan && !isJustConfidenceNumber) setReadyForBaseline(true);
+  
+    // ✅ show the user's message immediately (same as before)
+    setMessages((prev) => [
+      ...prev,
+      { id: uid("msg"), role: "user", text: userText, type: "text", ts: new Date().toISOString() },
+    ]);
+  
+    // ✅ ENFORCEMENT: if plan requested but no baseline yet, prompt baseline and stop.
+    // (Do this BEFORE setLoading(true) and BEFORE calling backend)
+    const baseline = getLocalBaseline(); // helper you added inside Chat()
+    // Only enforce baseline if we're NOT already in a baseline flow
+    if (askedForPlan && !isJustConfidenceNumber && baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
+   promptBaselineNow();
+   sendingRef.current = false;
+   return;
+   }
 
+  
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();
-
+  
     try {
       if (awaitingBaselineReason) {
+        setLoading(true);
         setAwaitingBaselineReason(false);
-        await callCoachBackend(`Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. Help me with empathy + practical suggestions, and (if useful) refine my existing plan.`);
+        await callCoachBackend(
+          `Baseline set for "${nLabel}" (${fLabel}). The main reason I’m not more confident is: ${userText}. Help me with empathy + practical suggestions, and (if useful) refine my existing plan.`
+        );
         return;
       }
-
+  
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
-          setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6).", ts: new Date().toISOString() }]);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+              ts: new Date().toISOString(),
+            },
+          ]);
           return;
         }
-
+  
         saveConfidence(level);
         await syncBaselineToBackend(level);
-
+  
         setAwaitingBaseline(false);
         setAwaitingBaselineReason(true);
-
+  
         setMessages((prev) => prev.filter((m) => !(m.type === "system" && m.kind === "baseline_prompt")));
-
+  
         upsertSystemMessage(setMessages, {
           id: `system_baseline_reason_${focus}_${needSlug}`,
           role: "assistant",
@@ -883,27 +954,39 @@ export default function Chat() {
         });
         return;
       }
-
+  
       if (awaitingDailyConfidence) {
         const level = parseConfidence(userText);
         if (level == null) {
-          setMessages((prev) => [...prev, { id: uid("msg"), role: "assistant", type: "text", mode: "coach", message: "Please reply with a number from 1 to 10 (for example: 6).", ts: new Date().toISOString() }]);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: uid("msg"),
+              role: "assistant",
+              type: "text",
+              mode: "coach",
+              message: "Please reply with a number from 1 to 10 (for example: 6).",
+              ts: new Date().toISOString(),
+            },
+          ]);
           return;
         }
-
+  
         saveConfidence(level);
         setAwaitingDailyConfidence(false);
-
-        await callCoachBackend(`My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`);
+  
+        await callCoachBackend(
+          `My confidence for "${nLabel}" (${fLabel}) right now is ${level}/10. I made progress on my plan. Reflect the change and suggest what to do next.`
+        );
         return;
       }
-
+  
       await callCoachBackend(`[Need: ${nLabel}] ${userText}`);
     } finally {
       setLoading(false);
       sendingRef.current = false;
     }
-  };
+  };  
 
   // -----------------------
   // Voice: record + send
