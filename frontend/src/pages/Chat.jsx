@@ -220,7 +220,6 @@ function historyRowToUiMessage(h) {
   const ts = h?.ts || new Date().toISOString();
 
   let role = String(h?.role || "").toLowerCase().trim();
-  // ✅ normalize backend roles
   if (role === "coach") role = "assistant";
 
   const text = String(h?.text || "");
@@ -239,7 +238,6 @@ function historyRowToUiMessage(h) {
     };
   }
 
-  // assistant (coach)
   if (kind === "checkin_12h") {
     return {
       id: `h_${backend_key}`,
@@ -370,16 +368,9 @@ function _norm(s) {
   return String(s || "").toLowerCase();
 }
 
-// Stronger heuristics
 const FEMALE_DENY = /(samantha|victoria|zira|susan|karen|tessa|veena|moira|female|woman)/i;
-
-// “male-ish” names commonly available across platforms
 const MALE_PREFER = /(alex|david|mark|daniel|tom|fred|george|james|john|male|man)/i;
-
-// Some Chrome/Android voices look like “Google UK English Male”
 const GOOGLE_MALE = /(google.*english.*male|english.*male)/i;
-
-// Some Apple voiceURI strings include alex
 const VOICEURI_MALE = /(alex|david|male)/i;
 
 function _pickVoice({ coachId = "mira", preferredVoiceName = null } = {}) {
@@ -388,10 +379,8 @@ function _pickVoice({ coachId = "mira", preferredVoiceName = null } = {}) {
 
   const isKai = _norm(coachId).includes("kai");
 
-  // Per-coach override (lets you lock a specific voice later)
   const key = isKai ? "tts_voice_name_kai" : "tts_voice_name_mira";
-  const coachOverride =
-    (typeof localStorage !== "undefined" && localStorage.getItem(key)) || null;
+  const coachOverride = (typeof localStorage !== "undefined" && localStorage.getItem(key)) || null;
 
   const overrideName = preferredVoiceName || coachOverride;
   if (overrideName) {
@@ -399,37 +388,29 @@ function _pickVoice({ coachId = "mira", preferredVoiceName = null } = {}) {
     if (exact) return exact;
   }
 
-  // Prefer English first
   const english = voices.filter((v) => /en/i.test(v.lang));
   const pool = english.length ? english : voices;
 
-  // Helper lists
   const enUS = pool.filter((v) => /en-US/i.test(v.lang));
   const enAny = pool;
 
   if (isKai) {
-    // 1) Best: en-US and matches male-ish and NOT female-ish
     const best1 =
       enUS.find((v) => MALE_PREFER.test(v.name) && !FEMALE_DENY.test(v.name)) ||
       enUS.find((v) => GOOGLE_MALE.test(v.name) && !FEMALE_DENY.test(v.name)) ||
       enUS.find((v) => VOICEURI_MALE.test(v.voiceURI) && !FEMALE_DENY.test(v.name));
-
     if (best1) return best1;
 
-    // 2) Any English male-ish not female-ish
     const best2 =
       enAny.find((v) => MALE_PREFER.test(v.name) && !FEMALE_DENY.test(v.name)) ||
       enAny.find((v) => GOOGLE_MALE.test(v.name) && !FEMALE_DENY.test(v.name)) ||
       enAny.find((v) => VOICEURI_MALE.test(v.voiceURI) && !FEMALE_DENY.test(v.name));
-
     if (best2) return best2;
 
-    // 3) Fallback: en-US that is NOT female-ish
     const best3 = enUS.find((v) => !FEMALE_DENY.test(v.name)) || enAny.find((v) => !FEMALE_DENY.test(v.name));
     return best3 || pool[0];
   }
 
-  // Mira default: prefer female-ish, then any en-US
   const female =
     enUS.find((v) => FEMALE_DENY.test(v.name)) ||
     enAny.find((v) => FEMALE_DENY.test(v.name)) ||
@@ -460,7 +441,6 @@ export function speakCoach(text, opts = {}) {
     u.rate = 1.0;
     u.pitch = 1.0;
 
-    // IMPORTANT: match lang to the chosen voice
     if (chosen?.lang) u.lang = chosen.lang;
     else u.lang = "en-US";
 
@@ -471,10 +451,6 @@ export function speakCoach(text, opts = {}) {
         window.speechSynthesis.speak(u);
       } catch {}
     }, 0);
-
-    if (!_ttsUnlocked) {
-      // still ok — just means the browser might block until a click
-    }
   } catch {}
 }
 
@@ -491,6 +467,7 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
 
   const backendMessages = Array.isArray(data.messages) ? data.messages : [];
   let lastAssistantText = null;
+  let sawBaselinePrompt = false;
 
   if (backendMessages.length > 0) {
     const toAdd = backendMessages
@@ -522,6 +499,8 @@ function applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKe
         const kind = String(m?.kind || "");
         const ts = String(m?.ts || m?.timestamp || m?.created_at || new Date().toISOString());
         if (!text) return null;
+
+        if (kind === "baseline_prompt") sawBaselinePrompt = true;
 
         const backend_key = `${ts}|${roleRaw}|${kind}|${text}`;
 
@@ -592,7 +571,7 @@ ${edges}
     ]);
   }
 
-  return { lastAssistantText };
+  return { lastAssistantText, sawBaselinePrompt };
 }
 
 export default function Chat() {
@@ -740,6 +719,36 @@ export default function Chat() {
     return /\b(plan|steps|roadmap|action items|what should i do|next steps|schedule)\b/.test(t);
   }
 
+  // ✅ NEW: Exit baseline mode if user is just chatting (prevents “stuck number input”)
+  function cancelBaselineFlowIfChatting(userText) {
+    const askedForPlan = userAskedForPlan(userText);
+    const isNum = parseConfidence(userText) != null;
+
+    // If we’re waiting for baseline/baseline-reason but the user isn’t asking for a plan,
+    // let them chat normally and clear the sticky baseline UI state.
+    if (!askedForPlan && !isNum && (awaitingBaseline || awaitingBaselineReason)) {
+      setAwaitingBaseline(false);
+      setAwaitingBaselineReason(false);
+      saveSession(`${uiKey}_awaitBaseline`, false);
+      saveSession(`${uiKey}_awaitBaselineReason`, false);
+
+      // Also reset “readyForBaseline” so it doesn’t re-trigger baseline prompt later.
+      setReadyForBaseline(false);
+      saveSession(`${uiKey}_readyBaseline`, false);
+
+      // Remove baseline system prompts
+      setMessages((prev) =>
+        (prev || []).filter(
+          (m) =>
+            !(
+              m.type === "system" &&
+              (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt" || m.kind === "voice_baseline_note")
+            )
+        )
+      );
+    }
+  }
+
   function upsertVoiceBaselineReminder() {
     const baseline = getLocalBaseline();
     if (baseline != null) return;
@@ -780,7 +789,7 @@ export default function Chat() {
         setMessages((prev) => {
           const prevArr = Array.isArray(prev) ? prev : [];
           const existingKeys = new Set(prevArr.map((x) => x?.backend_key).filter(Boolean));
-          if (awaitingBaseline || awaitingBaselineReason) return prevArr;
+          // Keep your previous behavior, but don’t permanently block normal history updates.
           const toAdd = incoming.filter((m) => m.backend_key && !existingKeys.has(m.backend_key));
           if (toAdd.length === 0) return prevArr;
           return [...prevArr, ...toAdd];
@@ -790,7 +799,7 @@ export default function Chat() {
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatKey, userId, focus, needKey, customNeedLabel, coachId, awaitingBaseline, awaitingBaselineReason]);
+  }, [chatKey, userId, focus, needKey, customNeedLabel, coachId]);
 
   useEffect(() => {
     save(chatKey, messages);
@@ -879,6 +888,7 @@ export default function Chat() {
 
     if (needKey === "custom" && !customNeedLabel.trim()) return;
 
+    // ✅ Only prompt baseline if user still has no baseline AND (readyForBaseline is true)
     if (!conf || typeof conf?.baseline !== "number") {
       setAwaitingBaseline(true);
       upsertSystemMessage(setMessages, {
@@ -964,9 +974,21 @@ export default function Chat() {
       if (mySeq !== reqSeqRef.current) return;
 
       const data = res.data || {};
-      const { lastAssistantText } = applyBackendChatResponse(setMessages, setBackendUI, data, focus, needKey, currentNeedLabel());
+      const { lastAssistantText, sawBaselinePrompt } = applyBackendChatResponse(
+        setMessages,
+        setBackendUI,
+        data,
+        focus,
+        needKey,
+        currentNeedLabel()
+      );
 
-      // ✅ Speak with the correct coach voice
+      // ✅ If backend didn’t ask baseline, don’t keep frontend stuck in baseline input.
+      if (!sawBaselinePrompt && awaitingBaseline) {
+        setAwaitingBaseline(false);
+        saveSession(`${uiKey}_awaitBaseline`, false);
+      }
+
       if (lastAssistantText) speakCoach(lastAssistantText, { coachId });
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
@@ -1068,7 +1090,6 @@ export default function Chat() {
     if (sendingRef.current) return;
     if (!input.trim() || loading) return;
 
-    // ✅ unlock TTS on user gesture
     unlockSpeech();
 
     if (needKey === "custom" && !customNeedLabel.trim()) {
@@ -1091,12 +1112,24 @@ export default function Chat() {
     const userText = input.trim();
     setInput("");
 
+    // ✅ NEW: if baseline UI is active but user is just chatting, cancel baseline flow
+    cancelBaselineFlowIfChatting(userText);
+
     if (!isGreeting(userText)) setHasUserSpoken(true);
 
     const askedForPlan = userAskedForPlan(userText);
     const isJustConfidenceNumber = parseConfidence(userText) != null;
 
-    if (!readyForBaseline && askedForPlan && !isJustConfidenceNumber) setReadyForBaseline(true);
+    // ✅ NEW: readyForBaseline should NOT be sticky forever.
+    // Turn it on only when user asks for plan. Turn it off when user stops asking for plan.
+    if (!readyForBaseline && askedForPlan && !isJustConfidenceNumber) {
+      setReadyForBaseline(true);
+      saveSession(`${uiKey}_readyBaseline`, true);
+    }
+    if (readyForBaseline && !askedForPlan && !isJustConfidenceNumber) {
+      setReadyForBaseline(false);
+      saveSession(`${uiKey}_readyBaseline`, false);
+    }
 
     setMessages((prev) => [
       ...prev,
@@ -1126,6 +1159,14 @@ export default function Chat() {
       if (awaitingBaseline) {
         const level = parseConfidence(userText);
         if (level == null) {
+          // If user typed non-number while awaiting baseline, allow normal chat if not asking for a plan.
+          if (!askedForPlan) {
+            setAwaitingBaseline(false);
+            saveSession(`${uiKey}_awaitBaseline`, false);
+            await callCoachBackend(`[Need: ${nLabel}] ${userText}`);
+            return;
+          }
+
           setMessages((prev) => [
             ...prev,
             {
@@ -1201,7 +1242,6 @@ export default function Chat() {
     if (awaitingDailyProgress) return;
     if (awaitingBaseline || awaitingDailyConfidence) return;
 
-    // ✅ unlock TTS on user gesture
     unlockSpeech();
 
     if (needKey === "custom" && !customNeedLabel.trim()) {
@@ -1312,8 +1352,8 @@ export default function Chat() {
       const ext = String(blob.type || "").includes("ogg") ? "ogg" : "webm";
       form.append("audio", blob, `voice.${ext}`);
 
+      // ✅ FIX: DO NOT manually set Content-Type for multipart/form-data (boundary must be auto)
       const res = await axios.post(`${API_BASE}/chat/voice`, form, {
-        headers: { "Content-Type": "multipart/form-data" },
         timeout: Math.max(AXIOS_TIMEOUT_MS, 60000),
       });
 
@@ -1325,7 +1365,6 @@ export default function Chat() {
       const chat = res.data?.chat || {};
       const { lastAssistantText } = applyBackendChatResponse(setMessages, setBackendUI, chat, focus, needKey, currentNeedLabel());
 
-      // ✅ Speak with the correct coach voice
       if (lastAssistantText) speakCoach(lastAssistantText, { coachId });
     } catch (err) {
       if (mySeq !== reqSeqRef.current) return;
@@ -1372,17 +1411,17 @@ export default function Chat() {
       sessionStorage.removeItem(`${uiKey}_awaitBaseline`);
       sessionStorage.removeItem(`${uiKey}_awaitBaselineReason`);
       sessionStorage.removeItem(`${uiKey}_awaitDailyConfidence`);
+      sessionStorage.removeItem(`${uiKey}_readyBaseline`);
     } catch {}
+
+    setReadyForBaseline(false);
 
     setMessages((prev) =>
       (prev || []).filter(
         (m) =>
           !(
             m.type === "system" &&
-            (m.kind === "baseline_prompt" ||
-              m.kind === "baseline_reason_prompt" ||
-              m.kind === "daily_conf_prompt" ||
-              m.kind === "voice_baseline_note")
+            (m.kind === "baseline_prompt" || m.kind === "baseline_reason_prompt" || m.kind === "daily_conf_prompt" || m.kind === "voice_baseline_note")
           )
       )
     );
