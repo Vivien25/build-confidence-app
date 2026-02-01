@@ -307,8 +307,9 @@ DEFAULT_STATE = {
         "last_sent_at": None,
     },
     "gates": {
-        "awaiting_baseline_for": None,  # topic_key or None
-        "pending_plan_topic": None,     # topic_key or None
+        "awaiting_baseline_for": None,         # topic_key or None
+        "pending_plan_topic": None,            # topic_key or None
+        "awaiting_baseline_reason_for": None,  # topic_key or None
     },
 }
 
@@ -602,7 +603,6 @@ def _inject_due_followup_if_needed(state: Dict[str, Any], coach_id: Optional[str
 def _coach_identity(coach_id: Optional[str]) -> Tuple[str, str]:
     c = (coach_id or "").lower().strip()
     if c in ["kai", "male", "coach_kai"]:
-        # IMPORTANT: identity lock
         name = "Kai"
         persona = (
             "You are Coach Kai (male). Friendly, direct, calm. Short sentences. Practical steps. "
@@ -798,7 +798,7 @@ def pick_resources(topic_key: str, task_text: str, max_items: int = 3) -> List[D
 
 
 # ===========================
-# Plan primitives (NOW coach-aware)
+# Plan primitives (coach-aware)
 # ===========================
 def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_text: str, coach_id: Optional[str]) -> Dict[str, Any]:
     coach_name, coach_persona = _coach_identity(coach_id)
@@ -806,7 +806,6 @@ def build_plan_object(topic_key: str, discovery_answers: Dict[str, Any], user_te
     deadline = discovery_answers.get("deadline") or "soon"
     target = discovery_answers.get("target") or "mixed"
 
-    # Identity lock in planning too
     system = (
         f"{coach_persona}\n"
         f"Identity lock: You are Coach {coach_name}. Never claim to be any other coach.\n\n"
@@ -897,7 +896,6 @@ def handle_chat(state: Dict[str, Any], user_text: str, topic_key: str, saved_con
             plan=plan,
         )
 
-    # Strong identity lock
     system = (
         f"{coach_persona}\n"
         f"Identity lock: You are Coach {coach_name}. "
@@ -954,7 +952,6 @@ def handle_plan_discovery(state: Dict[str, Any], user_text: str, topic_key: str)
 
     if q_asked >= len(DISCOVERY_QUESTIONS):
         pb["step"] = "DRAFT"
-        # NOTE: draft will be called by caller with coach_id
         return ChatResponse(
             messages=[_coach_msg("Thanks — give me one moment and I’ll build your plan.")],
             ui=UIState(mode="PLAN_BUILD", show_plan_sidebar=True),
@@ -1180,10 +1177,56 @@ def process_chat_message(
     gates = state.get("gates") or {}
     awaiting_for = gates.get("awaiting_baseline_for")
     pending_plan_topic = gates.get("pending_plan_topic")
+    awaiting_reason_for = gates.get("awaiting_baseline_reason_for")
 
+    # ✅ 1) If we're waiting for baseline reason, treat THIS message as the reason,
+    # store it, then begin discovery cleanly (without mixing flows).
+    if awaiting_reason_for == topic_key:
+        conf = state["metrics"]["confidence"].setdefault(topic_key, {})
+        conf["baseline_reason"] = user_text
+        conf["baseline_reason_at"] = _now_iso()
+
+        gates["awaiting_baseline_reason_for"] = None
+        state["gates"] = gates
+
+        # now begin plan discovery (ask Q1)
+        pb = state["plan_build"]
+        pb["topic"] = topic_key
+        pb["step"] = "DISCOVERY"
+        pb["discovery_questions_asked"] = 0
+        pb["discovery_answers"] = {}
+        pb["locked"] = False
+        state["mode"] = "PLAN_BUILD"
+
+        resp = handle_plan_discovery(state, "", topic_key)  # pass empty so we don't save reason as an answer
+
+        if resp.messages:
+            m0 = resp.messages[0]
+            state["history"].append({"role": "coach", "text": m0.text, "ts": m0.ts, "kind": (m0.kind or "coach")})
+            state["history"] = state["history"][-120:]
+
+        bucket.clear()
+        bucket.update(state)
+        _save_all_state(all_state)
+        return resp
+
+    # ✅ 2) If baseline number just arrived while we were awaiting it,
+    # set "awaiting reason" and return no message (frontend can prompt for reason).
     if saved_conf and awaiting_for == topic_key:
         gates["awaiting_baseline_for"] = None
+        gates["awaiting_baseline_reason_for"] = topic_key
         state["gates"] = gates
+
+        bucket.clear()
+        bucket.update(state)
+        _save_all_state(all_state)
+
+        return ChatResponse(
+            messages=[],
+            ui=UIState(mode="CHAT", show_plan_sidebar=True),
+            effects=Effects(saved_confidence=True),
+            plan=None,
+        )
 
     # Baseline gate (prompt ONCE)
     gate_resp = _ensure_baseline_gate(state, user_text, topic_key)
@@ -1301,7 +1344,6 @@ def chat_history(
             text = str(m.get("text") or "")
             ts = str(m.get("ts") or "") or _now_iso()
             kind = m.get("kind")
-            # Always append safely (no Pydantic crash)
             msgs.append(HistoryMessage(role=role, text=text, ts=ts, kind=kind))
 
         return HistoryResponse(topic=topic_key, messages=msgs)

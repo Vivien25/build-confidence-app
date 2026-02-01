@@ -23,10 +23,9 @@ export default function Welcome() {
           </p>
         </div>
 
-        {/* RIGHT: fills the entire right side */}
+        {/* RIGHT */}
         <div style={styles.right}>
           <div style={styles.splitPanel}>
-            {/* Mira side */}
             <button
               type="button"
               onClick={() => pickCoach("mira")}
@@ -34,14 +33,7 @@ export default function Welcome() {
               aria-label="Choose Mira"
               title="Mira"
             >
-              {/* fill layer */}
-              <div
-                style={{
-                  ...styles.bgFill,
-                  backgroundImage: `url(${coachMira})`,
-                }}
-              />
-              {/* face-safe layer */}
+              <div style={styles.backdropLeft} />
               <img src={coachMira} alt="Mira" style={styles.faceSafe} />
 
               <div style={styles.labelLeft}>
@@ -50,7 +42,6 @@ export default function Welcome() {
               </div>
             </button>
 
-            {/* Kai side */}
             <button
               type="button"
               onClick={() => pickCoach("kai")}
@@ -58,12 +49,7 @@ export default function Welcome() {
               aria-label="Choose Kai"
               title="Kai"
             >
-              <div
-                style={{
-                  ...styles.bgFill,
-                  backgroundImage: `url(${coachKai})`,
-                }}
-              />
+              <div style={styles.backdropRight} />
               <img src={coachKai} alt="Kai" style={styles.faceSafe} />
 
               <div style={styles.labelRight}>
@@ -72,7 +58,6 @@ export default function Welcome() {
               </div>
             </button>
 
-            {/* subtle unify overlay */}
             <div style={styles.overlay} />
           </div>
 
@@ -90,8 +75,6 @@ const styles = {
     display: "flex",
     alignItems: "center",
   },
-
-  // Make the right side feel like a real “panel”
   layout: {
     width: "min(1200px, 96vw)",
     margin: "0 auto",
@@ -118,15 +101,12 @@ const styles = {
     maxWidth: 520,
   },
 
-  right: {
-    width: "100%",
-  },
+  right: { width: "100%" },
 
-  // This fills the entire right column
   splitPanel: {
     position: "relative",
     width: "100%",
-    height: "min(520px, 70vh)",
+    height: "min(640px, 78vh)", // ✅ taller: fills right side
     borderRadius: 26,
     overflow: "hidden",
     border: "1px solid rgba(58,47,42,0.18)",
@@ -142,33 +122,37 @@ const styles = {
     margin: 0,
     cursor: "pointer",
     background: "transparent",
+    transition: "transform 140ms ease",
   },
 
+  // slightly more balanced split
   leftHalf: {
-    clipPath: "polygon(0 0, 62% 0, 46% 100%, 0 100%)",
+    clipPath: "polygon(0 0, 66% 0, 48% 100%, 0 100%)",
   },
   rightHalf: {
-    clipPath: "polygon(62% 0, 100% 0, 100% 100%, 46% 100%)",
+    clipPath: "polygon(66% 0, 100% 0, 100% 100%, 48% 100%)",
   },
 
-  // Background that fills space (blurred cover)
-  bgFill: {
+  backdropLeft: {
     position: "absolute",
     inset: 0,
-    backgroundSize: "cover",
-    backgroundPosition: "center",
-    filter: "blur(14px) saturate(1.1)",
-    transform: "scale(1.08)",
-    opacity: 0.55,
+    background:
+      "radial-gradient(900px 600px at 30% 30%, rgba(255,233,215,0.95), rgba(255,255,255,0.55) 55%, rgba(127,191,163,0.20))",
+  },
+  backdropRight: {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(900px 600px at 70% 30%, rgba(255,233,215,0.80), rgba(255,255,255,0.50) 55%, rgba(227,139,109,0.18))",
   },
 
-  // Foreground that guarantees full face is visible (contain)
+  // ✅ bigger portrait without cropping the face harshly
   faceSafe: {
     position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: "100%",
-    objectFit: "contain",       // ✅ shows full face
+    inset: "-4% -6%",     // ✅ visually “zoom in”
+    width: "112%",
+    height: "108%",
+    objectFit: "contain",
     objectPosition: "center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
   },
