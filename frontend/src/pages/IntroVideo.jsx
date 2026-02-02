@@ -26,7 +26,7 @@ export default function IntroVideo() {
   }, [coachId]);
 
   const goNext = () => {
-    navigate("/focus");
+    navigate("/onboarding");
   };
 
   const toggleMute = () => {
