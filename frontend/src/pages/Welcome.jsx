@@ -29,7 +29,11 @@ export default function Welcome() {
         <div style={styles.left}>
           <h1 style={isMobile ? styles.titleMobile : styles.title}>Better Me</h1>
           <p style={styles.subtitle}>
-          Confidence isn't found; it’s built, step by step, right in your pocket.
+             Confidence isn&apos;t found;
+              <span style={styles.subtitleEmphasis}>
+             {" "}it’s built, step by step,
+            </span>
+           <span style={styles.subtitleSoft}> right in your pocket.</span>
           </p>
         </div>
 
