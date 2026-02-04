@@ -247,7 +247,7 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "20% center",
+    objectPosition: "10% center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",
   },
@@ -262,10 +262,10 @@ const styles = {
 
     // crop to left ~66%
     //clipPath: "inset(0 34% 0 0)",
-    WebkitClipPath: "inset(0 34% 0 0)",
+    //WebkitClipPath: "inset(0 34% 0 0)",
 
     // zoom + move right (tune these)
-    transform: "scale(1.18) translateX(16%)",
+    transform: "scale(1.08) translateX(20%)",
     transformOrigin: "center",
 
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
