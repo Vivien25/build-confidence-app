@@ -28,13 +28,15 @@ export default function Welcome() {
         {/* LEFT */}
         <div style={styles.left}>
           <h1 style={isMobile ? styles.titleMobile : styles.title}>Better Me</h1>
+
           <p style={styles.subtitle}>
-             Confidence isn&apos;t found;
-              <span style={styles.subtitleEmphasis}>
-             {" "}it’s built, step by step,
-            </span>
-           <span style={styles.subtitleSoft}> right in your pocket.</span>
+            Confidence isn&apos;t found;
+            <span style={styles.subtitleEmphasis}>{" "}it’s built, step by step,</span>
+            <span style={styles.subtitleSoft}>{" "}right in your pocket.</span>
           </p>
+
+          {/* ✅ Optional: remove later (helps verify deploy) */}
+          {/* <div style={{ fontSize: 12, opacity: 0.55, marginTop: 8 }}>welcome-v7</div> */}
         </div>
 
         {/* RIGHT */}
@@ -189,12 +191,26 @@ const styles = {
     lineHeight: 1.0,
   },
 
+  // ✅ More elegant base subtitle
   subtitle: {
-    margin: "16px 0 0 0",
-    fontSize: 18,
-    lineHeight: 1.7,
-    color: "rgba(58,47,42,0.72)",
-    maxWidth: 520,
+    margin: "18px 0 0 0",
+    fontSize: 20,
+    lineHeight: 1.6,
+    color: "rgba(58,47,42,0.65)",
+    maxWidth: 560,
+  },
+
+  // ✅ Shiny highlight for the key phrase
+  subtitleEmphasis: {
+    fontWeight: 650,
+    background: "linear-gradient(90deg, #8b5e3c, #cfa26a, #8b5e3c)",
+    WebkitBackgroundClip: "text",
+    WebkitTextFillColor: "transparent",
+  },
+
+  // ✅ Softer ending phrase
+  subtitleSoft: {
+    color: "rgba(58,47,42,0.52)",
   },
 
   right: { width: "100%" },
@@ -256,22 +272,15 @@ const styles = {
     pointerEvents: "none",
   },
 
-  // ✅ Kai: crop to left 2/3 + shift content right
+  // Kai settings (keep as your current behavior)
   faceSafeRight: {
     position: "absolute",
     inset: 0,
     width: "100%",
     height: "100%",
     objectFit: "cover",
-
-    // crop to left ~66%
-    //clipPath: "inset(0 34% 0 0)",
-    //WebkitClipPath: "inset(0 34% 0 0)",
-
-    // zoom + move right (tune these)
     transform: "scale(1.08) translateX(20%)",
     transformOrigin: "center",
-
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",
   },
