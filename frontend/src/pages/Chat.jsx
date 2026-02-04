@@ -963,34 +963,10 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [needKey, customNeedLabel, focus, coachId]);
 
-  useEffect(() => {
-    if (!chatHydrated) return;
-    if (!hasUserSpoken || !readyForBaseline) return;
-    if (anyPromptActive()) return;
-
-    const conf = loadSaved(confidenceKey, null);
-    const fLabel = focusLabel(focus);
-    const nLabel = currentNeedLabel();
-
-    if (needKey === "custom" && !customNeedLabel.trim()) return;
-
-    if (!conf || typeof conf?.baseline !== "number") {
-      setAwaitingBaseline(true);
-      upsertSystemMessage(setMessages, {
-        id: `system_baseline_${focus}_${needSlug}_${coachId}`,
-        role: "assistant",
-        type: "system",
-        kind: "baseline_prompt",
-        mode: "coach",
-        message: `Before we go deeper on **${nLabel}** (${fLabel}), quick baseline.\nOn a scale from 1–10, what is your confidence level right now?`,
-        ts: new Date().toISOString(),
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatHydrated, hasUserSpoken, readyForBaseline, confidenceKey, focus, needKey, customNeedLabel, coachId]);
-
   const acceptPlan = (planObj) => {
-    const accepted = { ...planObj, acceptedAt: new Date().toISOString() };
+    const baseline = getLocalBaseline();
+    
+    const accepted = { ...planObj, acceptedAt: new Date().toISOString(),confidenceBaseline: typeof baseline === "number" ? baseline : null, };
     save(activeNeedStorage, accepted?.needKey || needKey);
 
     setPlans((prev) => {
@@ -1059,7 +1035,7 @@ export default function Chat() {
       if (mySeq !== reqSeqRef.current) return;
 
       const data = res.data || {};
-      const { lastAssistantText, sawBaselinePrompt } = applyBackendChatResponse(
+      const { lastAssistantText, sawBaselinePrompt,sawBaselineReasonPrompt} = applyBackendChatResponse(
         setMessages,
         setBackendUI,
         data,
@@ -1067,6 +1043,22 @@ export default function Chat() {
         needKey,
         currentNeedLabel()
       );
+
+      // ✅ backend-driven baseline flow
+    if (sawBaselinePrompt) {
+    setAwaitingBaseline(true);
+    setAwaitingBaselineReason(false);
+    saveSession(`${uiKey}_awaitBaseline`, true);
+    saveSession(`${uiKey}_awaitBaselineReason`, false);
+    }
+
+   if (sawBaselineReasonPrompt) {
+     setAwaitingBaseline(false);
+     setAwaitingBaselineReason(true);
+     saveSession(`${uiKey}_awaitBaseline`, false);
+     saveSession(`${uiKey}_awaitBaselineReason`, true);
+    }
+
 
       if (!sawBaselinePrompt && awaitingBaseline) {
         setAwaitingBaseline(false);
@@ -1216,13 +1208,6 @@ export default function Chat() {
       ...prev,
       { id: uid("msg"), role: "user", text: userText, type: "text", ts: new Date().toISOString() },
     ]);
-
-    const baseline = getLocalBaseline();
-    if (askedForPlan && !isJustConfidenceNumber && baseline == null && !awaitingBaseline && !awaitingBaselineReason) {
-      promptBaselineNow();
-      sendingRef.current = false;
-      return;
-    }
 
     const fLabel = focusLabel(focus);
     const nLabel = currentNeedLabel();

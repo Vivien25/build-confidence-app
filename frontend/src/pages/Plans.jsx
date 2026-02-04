@@ -188,10 +188,21 @@ export default function Plans() {
   function getConfidenceForPlan(plan) {
     const key = confidenceKeyForPlan(plan);
     const conf = loadSaved(key, null);
-    if (!conf || typeof conf !== "object") return null;
 
-    const baseline = typeof conf.baseline === "number" ? conf.baseline : null;
-    const history = Array.isArray(conf.history) ? conf.history : [];
+    // ✅ Support both: confidence stored under bc_conf_* AND baseline snapshot saved in the plan
+    let baseline = null;
+    let history = [];
+
+    if (conf && typeof conf === "object") {
+      baseline = typeof conf.baseline === "number" ? conf.baseline : null;
+      history = Array.isArray(conf.history) ? conf.history : [];
+    }
+
+    // ✅ fallback: baseline saved into plan at accept time (Chat.jsx)
+    if (baseline == null && typeof plan?.confidenceBaseline === "number") {
+      baseline = plan.confidenceBaseline;
+    }
+
     const t = todayStr();
 
     const todayRow = history.find((x) => x?.date === t);
