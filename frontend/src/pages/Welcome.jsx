@@ -29,7 +29,7 @@ export default function Welcome() {
         <div style={styles.left}>
           <h1 style={isMobile ? styles.titleMobile : styles.title}>Better Me</h1>
           <p style={styles.subtitle}>
-            Your friendly coach to grow confidence, one step at a time.
+          Confidence isn't found; it’s built, step by step, right in your pocket.
           </p>
         </div>
 
@@ -247,7 +247,7 @@ const styles = {
     width: "116%",
     height: "112%",
     objectFit: "contain",
-    objectPosition: "40% center",
+    objectPosition: "20% center",
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
     pointerEvents: "none",
   },
@@ -261,11 +261,11 @@ const styles = {
     objectFit: "cover",
 
     // crop to left ~66%
-    clipPath: "inset(0 34% 0 0)",
+    //clipPath: "inset(0 34% 0 0)",
     WebkitClipPath: "inset(0 34% 0 0)",
 
     // zoom + move right (tune these)
-    transform: "scale(1.18) translateX(12%)",
+    transform: "scale(1.18) translateX(16%)",
     transformOrigin: "center",
 
     filter: "drop-shadow(0 18px 30px rgba(0,0,0,0.15))",
